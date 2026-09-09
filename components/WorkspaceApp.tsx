@@ -280,7 +280,7 @@ const SHORTCUT_SECTIONS = [
       { keys: ["[[["], description: "Link autocomplete that also searches archived pages" },
       { keys: ["?showparent"], description: "After a node link: show the linked item's parent in parentheses" },
       { keys: ["?hidetags"], description: "After a node link: hide #tags from the linked text" },
-      { keys: ["?showchildren"], description: "After a node link: show the linked item's children inline" },
+      { keys: ["?showchildren"], description: "After a node or page link: show its items inline" },
       { keys: ["?hidetags?showchildren"], description: "Combine node link options with ? or &" },
     ],
   },
@@ -513,6 +513,12 @@ type NodeLinkTargetResolution = {
   parentArchived: boolean;
   nestedNodeTexts?: Record<string, string>;
   childTree?: NodeLinkChildTreeResult | null;
+};
+type PageLinkTreeResult = {
+  page: PageDoc;
+  nodes: Doc<"nodes">[];
+  nodeBacklinkCounts: Record<string, number>;
+  loadWarning: string | null;
 };
 type LinkSuggestion =
   | {
@@ -3053,6 +3059,7 @@ function buildLinkPreviewSegments(
         linkKind: "page",
         href: null,
         pageTypeBadge: page ? getPageTypeEmoji(page) : null,
+        showChildren: match.link.showChildren === true,
       });
     } else {
       const targetNode = nodeTargetsById.get(match.link.targetNodeRef);
@@ -17357,7 +17364,7 @@ function LinkedNodeChildrenBlock({
   plannerSymbolModePlannerPageId = null,
 }: {
   sourcePage: PageDoc;
-  rootNode: Doc<"nodes">;
+  rootNode: Doc<"nodes"> | null;
   roots: TreeNode[];
   nodeMap: Map<string, Doc<"nodes">>;
   nodeBacklinkCounts: Map<string, number>;
@@ -17429,7 +17436,7 @@ function LinkedNodeChildrenBlock({
   const linkedSymbolLabelsByNodeId = linkedSymbolState.labelsByNodeId;
   const linkedSymbolFailedNodeIds = linkedSymbolState.failedNodeIds;
   const sourcePageId = sourcePage._id as Id<"pages">;
-  const rootNodeId = rootNode._id as Id<"nodes">;
+  const rootNodeId = (rootNode?._id as Id<"nodes"> | undefined) ?? null;
   const isSourcePageReadOnly = sourcePage.archived;
 
   const selectLinkedNodeRange = useCallback(
@@ -19270,16 +19277,38 @@ function OutlineNodeEditor({
   const hasInlineFormattingPreview = hasRenderableInlineFormatting(displayDraft);
   const shouldHideNoteMarker = false;
   const shouldRevealVisualPlaceholder = isFocused || isSelected;
-  const parsedNodeLinkTargets = useMemo(() => {
+  const parsedLinkTargets = useMemo(() => {
     const allNodeIds: Id<"nodes">[] = [];
     const showChildrenNodeIds: Id<"nodes">[] = [];
+    const showChildrenPageIds: Id<"pages">[] = [];
     const blockedShowChildrenNodeIds = new Set([
       ...showChildrenAncestorNodeIds,
       ...getAncestorNodeIds(node._id as string, nodeMap),
       node._id as string,
+      pageId as string,
     ]);
 
     for (const match of extractLinkMatches(draft)) {
+      if (match.link.kind === "page") {
+        if (
+          match.link.showChildren !== true ||
+          showChildrenDepth >= MAX_NODE_LINK_SHOW_CHILDREN_DEPTH
+        ) {
+          continue;
+        }
+        const targetPage =
+          (match.link.targetPageRef
+            ? pagesById.get(match.link.targetPageRef)
+            : null) ??
+          (match.link.targetPageTitle
+            ? pagesByTitle.get(normalizePageTitleKey(match.link.targetPageTitle))
+            : null);
+        if (targetPage && !blockedShowChildrenNodeIds.has(targetPage._id as string)) {
+          showChildrenPageIds.push(targetPage._id as Id<"pages">);
+        }
+        continue;
+      }
+
       if (match.link.kind !== "node") {
         continue;
       }
@@ -19300,10 +19329,23 @@ function OutlineNodeEditor({
       showChildrenNodeIds: showChildrenNodeIds.filter(
         (value, index, collection) => collection.indexOf(value) === index,
       ),
+      showChildrenPageIds: showChildrenPageIds.filter(
+        (value, index, collection) => collection.indexOf(value) === index,
+      ),
     };
-  }, [draft, node._id, nodeMap, showChildrenAncestorNodeIds, showChildrenDepth]);
-  const nodeLinkTargetIds = parsedNodeLinkTargets.nodeIds;
-  const showChildrenNodeLinkTargetIds = parsedNodeLinkTargets.showChildrenNodeIds;
+  }, [
+    draft,
+    node._id,
+    nodeMap,
+    pageId,
+    pagesById,
+    pagesByTitle,
+    showChildrenAncestorNodeIds,
+    showChildrenDepth,
+  ]);
+  const nodeLinkTargetIds = parsedLinkTargets.nodeIds;
+  const showChildrenNodeLinkTargetIds = parsedLinkTargets.showChildrenNodeIds;
+  const showChildrenPageLinkTargetIds = parsedLinkTargets.showChildrenPageIds;
   const resolvedNodeLinks = useQuery(
     api.workspace.resolveNodeLinks,
     ownerKey && !isFocused && nodeLinkTargetIds.length > 0
@@ -19321,6 +19363,22 @@ function OutlineNodeEditor({
     }
     return next;
   }, [resolvedNodeLinks]);
+  const resolvedPageLinks = useQuery(
+    api.workspace.resolvePageLinks,
+    ownerKey && !isFocused && showChildrenPageLinkTargetIds.length > 0
+      ? {
+          ownerKey,
+          pageIds: showChildrenPageLinkTargetIds,
+        }
+      : SKIP,
+  ) as PageLinkTreeResult[] | undefined;
+  const pageTargetsById = useMemo(() => {
+    const next = new Map<string, PageLinkTreeResult>();
+    for (const target of resolvedPageLinks ?? []) {
+      next.set(target.page._id as string, target);
+    }
+    return next;
+  }, [resolvedPageLinks]);
   const linkPreviewSegments = useMemo(() => {
     return buildLinkPreviewSegments(displayDraft, pagesByTitle, pagesById, nodeTargetsById);
   }, [displayDraft, nodeTargetsById, pagesById, pagesByTitle]);
@@ -19341,41 +19399,78 @@ function OutlineNodeEditor({
       linkPreviewSegments.flatMap((segment) => {
         if (
           segment.kind !== "link" ||
-          segment.linkKind !== "node" ||
-          segment.showChildren !== true ||
-          !segment.nodeId
+          segment.showChildren !== true
         ) {
           return [];
         }
 
-        const target = nodeTargetsById.get(segment.nodeId as string);
-        const childTree = target?.childTree ?? null;
-        if (!childTree) {
-          return [];
+        if (segment.linkKind === "node" && segment.nodeId) {
+          const target = nodeTargetsById.get(segment.nodeId as string);
+          const childTree = target?.childTree ?? null;
+          if (!childTree) {
+            return [];
+          }
+
+          const childTreeNodes = toTreeNodes(childTree.nodes);
+          const rootTreeNode =
+            findTreeNodeById(childTreeNodes, childTree.rootNode._id as string) ??
+            childTreeNodes[0] ??
+            null;
+          const collapseKey = `node-link-show-children:${node._id as string}:${childTree.rootNode._id as string}`;
+
+          return [
+            {
+              key: `${segment.key}:show-children`,
+              collapseKey,
+              isCollapsed: collapsedNodeIds.has(collapseKey),
+              sourcePage: childTree.sourcePage,
+              rootNode: childTree.rootNode as Doc<"nodes"> | null,
+              roots: rootTreeNode?.children ?? [],
+              nodeMap: new Map(
+                childTree.nodes.map((childNode) => [childNode._id as string, childNode]),
+              ),
+              nodeBacklinkCounts: new Map(Object.entries(childTree.nodeBacklinkCounts ?? {})),
+              loadWarning: childTree.loadWarning,
+            },
+          ];
         }
 
-        const childTreeNodes = toTreeNodes(childTree.nodes);
-        const rootTreeNode =
-          findTreeNodeById(childTreeNodes, childTree.rootNode._id as string) ??
-          childTreeNodes[0] ??
-          null;
-        const collapseKey = `node-link-show-children:${node._id as string}:${childTree.rootNode._id as string}`;
+        if (segment.linkKind === "page" && segment.pageId) {
+          const pageTree = pageTargetsById.get(segment.pageId as string);
+          if (!pageTree) {
+            return [];
+          }
 
-        return [
-          {
-            key: `${segment.key}:show-children`,
-            collapseKey,
-            isCollapsed: collapsedNodeIds.has(collapseKey),
-            sourcePage: childTree.sourcePage,
-            rootNode: childTree.rootNode,
-            roots: rootTreeNode?.children ?? [],
-            nodeMap: new Map(childTree.nodes.map((childNode) => [childNode._id as string, childNode])),
-            nodeBacklinkCounts: new Map(Object.entries(childTree.nodeBacklinkCounts ?? {})),
-            loadWarning: childTree.loadWarning,
-          },
-        ];
+          const collapseKey = `page-link-show-children:${node._id as string}:${pageTree.page._id as string}`;
+          const rootOrder = shouldOrderArchiveRootsByRecency(pageTree.page)
+            ? "recentlyAdded"
+            : "position";
+          return [
+            {
+              key: `${segment.key}:show-children`,
+              collapseKey,
+              isCollapsed: collapsedNodeIds.has(collapseKey),
+              sourcePage: pageTree.page,
+              rootNode: null,
+              roots: toTreeNodes(pageTree.nodes, rootOrder),
+              nodeMap: new Map(
+                pageTree.nodes.map((childNode) => [childNode._id as string, childNode]),
+              ),
+              nodeBacklinkCounts: new Map(Object.entries(pageTree.nodeBacklinkCounts ?? {})),
+              loadWarning: pageTree.loadWarning,
+            },
+          ];
+        }
+
+        return [];
       }),
-    [collapsedNodeIds, linkPreviewSegments, node._id, nodeTargetsById],
+    [
+      collapsedNodeIds,
+      linkPreviewSegments,
+      node._id,
+      nodeTargetsById,
+      pageTargetsById,
+    ],
   );
   const hasExpandedLinkedShowChildrenTrees = linkedShowChildrenTrees.some(
     (linkedTree) => !linkedTree.isCollapsed,
@@ -22065,7 +22160,9 @@ function OutlineNodeEditor({
                     new Set([
                       ...showChildrenAncestorNodeIds,
                       node._id as string,
-                      linkedTree.rootNode._id as string,
+                      linkedTree.rootNode
+                        ? (linkedTree.rootNode._id as string)
+                        : (linkedTree.sourcePage._id as string),
                     ])
                   }
                   plannerSymbolModeEnabled={plannerSymbolModeEnabled}

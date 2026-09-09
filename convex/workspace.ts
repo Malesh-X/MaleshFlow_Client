@@ -4391,6 +4391,31 @@ export const resolveNodeLinks = query({
   },
 });
 
+export const resolvePageLinks = query({
+  args: {
+    ownerKey: v.string(),
+    pageIds: v.array(v.id("pages")),
+  },
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+
+    const uniquePageIds = [...new Set(args.pageIds)];
+    const pages = await Promise.all(uniquePageIds.map((pageId) => ctx.db.get(pageId)));
+    return await Promise.all(
+      pages
+        .filter(
+          (page): page is Doc<"pages"> => page !== null && !isPagePendingDeletion(page),
+        )
+        .map((page) =>
+          buildPageTreeResult(ctx, page, {
+            maxNodes: MAX_NODE_LINK_CHILD_TREE_NODES,
+            maxTextChars: MAX_NODE_LINK_CHILD_TREE_TEXT_CHARS,
+          }),
+        ),
+    );
+  },
+});
+
 export const listTasks = query({
   args: {
     ownerKey: v.string(),

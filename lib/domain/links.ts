@@ -4,6 +4,7 @@ export type ExtractedLink =
       label: string;
       targetPageTitle?: string;
       targetPageRef?: string;
+      showChildren?: boolean;
     }
   | {
       kind: "node";
@@ -33,13 +34,15 @@ const PLAIN_URL_PATTERN =
   /(?:https?:\/\/[^\s<]+|www\.[^\s<]+|(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?)/g;
 const PLAIN_EMAIL_PATTERN =
   /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const PAGE_WIKI_TARGET_PATTERN = /^(?:(.*?)\|)?page:([a-zA-Z0-9_-]+)$/;
+const PAGE_WIKI_TARGET_PATTERN =
+  /^(?:(.*?)\|)?page:([a-zA-Z0-9_-]+)(\?[A-Za-z]+(?:[?&][A-Za-z]+)*)?$/;
 const NODE_WIKI_TARGET_PATTERN = /^(?:(.*?)\|)?node:([a-zA-Z0-9_-]+)(\?[A-Za-z]+(?:[?&][A-Za-z]+)*)?$/;
 const BARE_NODE_WIKI_TARGET_PATTERN = /^(?:node_[a-zA-Z0-9_-]+|k17[0-9a-z]{20,})$/i;
 const BARE_NODE_WIKI_TARGET_WITH_OPTIONS_PATTERN =
   /^((?:node_[a-zA-Z0-9_-]+|k17[0-9a-z]{20,}))(\?[A-Za-z]+(?:[?&][A-Za-z]+)*)?$/i;
 const NODE_LINK_OPTION_TEXT_PATTERN =
   /\?(?:showparent|hidetags|showchildren)(?:[?&](?:showparent|hidetags|showchildren))*$/i;
+const PAGE_LINK_OPTION_TEXT_PATTERN = /\?showchildren(?:[?&]showchildren)*$/i;
 const NODE_LINK_OPTION_CANDIDATE_PATTERN = /^\?[A-Za-z]+(?:[?&][A-Za-z]+)*/;
 const COMPLETE_MARKDOWN_LINK_PATTERN = /^\[([^\]]+)\]\(([^)]*)\)$/;
 const COMPLETE_WIKI_LINK_PATTERN = /^\[\[([^[\]]+)\]\]$/;
@@ -214,6 +217,47 @@ function readTrailingNodeLinkOptions(text: string, start: number) {
   };
 }
 
+function parsePageLinkOptions(optionText: string | null | undefined) {
+  if (!optionText) {
+    return {
+      text: "",
+      showChildren: false,
+    };
+  }
+
+  if (!optionText.startsWith("?")) {
+    return null;
+  }
+
+  const options = optionText.slice(1).split(/[?&]/);
+  if (
+    options.length === 0 ||
+    options.some((option) => option.length === 0 || option.toLowerCase() !== "showchildren")
+  ) {
+    return null;
+  }
+
+  return {
+    text: optionText,
+    showChildren: true,
+  };
+}
+
+function readTrailingPageLinkOptions(text: string, start: number) {
+  const match = text.slice(start).match(NODE_LINK_OPTION_CANDIDATE_PATTERN);
+  if (!match) {
+    return {
+      text: "",
+      showChildren: false,
+    };
+  }
+
+  return parsePageLinkOptions(match[0]) ?? {
+    text: "",
+    showChildren: false,
+  };
+}
+
 function stripTrailingNodeLinkOptions(label: string) {
   return label.replace(NODE_LINK_OPTION_TEXT_PATTERN, "");
 }
@@ -237,14 +281,30 @@ export function extractLinkMatches(text: string) {
       if (!ref) {
         continue;
       }
+      const innerOptions = parsePageLinkOptions(pageMatch[3]);
+      if (!innerOptions) {
+        continue;
+      }
+      const trailingOptions = readTrailingPageLinkOptions(
+        text,
+        (match.index ?? 0) + match[0].length,
+      );
+      const label = trailingOptions.text
+        ? `${match[0]}${trailingOptions.text}`
+        : match[0];
+      const showChildren = innerOptions.showChildren || trailingOptions.showChildren;
 
       matches.push({
         start: match.index ?? 0,
-        end: (match.index ?? 0) + match[0].length,
+        end:
+          (match.index ?? 0) +
+          match[0].length +
+          trailingOptions.text.length,
         link: {
           kind: "page",
-          label: match[0],
+          label,
           targetPageRef: ref,
+          ...(showChildren ? { showChildren: true } : {}),
         },
       });
       continue;
@@ -328,14 +388,35 @@ export function extractLinkMatches(text: string) {
       continue;
     }
 
+    const inlineOptionsMatch = inner.match(PAGE_LINK_OPTION_TEXT_PATTERN);
+    const inlineOptions = parsePageLinkOptions(inlineOptionsMatch?.[0]);
+    const targetPageTitle = inlineOptionsMatch
+      ? inner.slice(0, -inlineOptionsMatch[0].length).trim()
+      : inner;
+    const trailingOptions = readTrailingPageLinkOptions(
+      text,
+      (match.index ?? 0) + match[0].length,
+    );
+    const label = trailingOptions.text
+      ? `${match[0]}${trailingOptions.text}`
+      : match[0];
+    const showChildren = Boolean(inlineOptions?.showChildren || trailingOptions.showChildren);
+    if (!targetPageTitle) {
+      continue;
+    }
+
     matches.push({
       start: match.index ?? 0,
-      end: (match.index ?? 0) + match[0].length,
-        link: {
-          kind: "page",
-          label: match[0],
-          targetPageTitle: inner,
-        },
+      end:
+        (match.index ?? 0) +
+        match[0].length +
+        trailingOptions.text.length,
+      link: {
+        kind: "page",
+        label,
+        targetPageTitle,
+        ...(showChildren ? { showChildren: true } : {}),
+      },
     });
   }
 
@@ -475,8 +556,12 @@ export function getExplicitWikiLinkPreviewText(label: string) {
     return "";
   }
 
-  return wikiLabel
-    .slice(2, -2)
+  const wikiText = wikiLabel.slice(2, -2);
+  const previewText = wikiText.includes("|")
+    ? wikiText
+    : wikiText.replace(PAGE_LINK_OPTION_TEXT_PATTERN, "");
+
+  return previewText
     .replace(
       /^node:[a-zA-Z0-9_-]+(?:\?(?:showparent|hidetags|showchildren)(?:[?&](?:showparent|hidetags|showchildren))*)?$/i,
       "",
@@ -485,12 +570,12 @@ export function getExplicitWikiLinkPreviewText(label: string) {
       /^(?:node_[a-zA-Z0-9_-]+|k17[0-9a-z]{20,})(?:\?(?:showparent|hidetags|showchildren)(?:[?&](?:showparent|hidetags|showchildren))*)?$/i,
       "",
     )
-    .replace(/^page:[a-zA-Z0-9_-]+$/, "")
+    .replace(/^page:[a-zA-Z0-9_-]+(?:\?showchildren(?:[?&]showchildren)*)?$/i, "")
     .replace(
       /\|node:[a-zA-Z0-9_-]+(?:\?(?:showparent|hidetags|showchildren)(?:[?&](?:showparent|hidetags|showchildren))*)?$/i,
       "",
     )
-    .replace(/\|page:[a-zA-Z0-9_-]+$/, "")
+    .replace(/\|page:[a-zA-Z0-9_-]+(?:\?showchildren(?:[?&]showchildren)*)?$/i, "")
     .trim();
 }
 

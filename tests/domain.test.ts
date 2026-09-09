@@ -768,6 +768,53 @@ test("extractLinks composes repeated question-mark node modifiers", () => {
   ]);
 });
 
+test("extractLinks parses showchildren page wiki links", () => {
+  const links = extractLinks(
+    "See [[page:page_123?showChildren]], [[Custom label|page:page_456]]?showchildren, [[Notes]]?ShowChildren, and [[Journal?showchildren]].",
+  );
+
+  assert.deepEqual(links, [
+    {
+      kind: "page",
+      label: "[[page:page_123?showChildren]]",
+      targetPageRef: "page_123",
+      showChildren: true,
+    },
+    {
+      kind: "page",
+      label: "[[Custom label|page:page_456]]?showchildren",
+      targetPageRef: "page_456",
+      showChildren: true,
+    },
+    {
+      kind: "page",
+      label: "[[Notes]]?ShowChildren",
+      targetPageTitle: "Notes",
+      showChildren: true,
+    },
+    {
+      kind: "page",
+      label: "[[Journal?showchildren]]",
+      targetPageTitle: "Journal",
+      showChildren: true,
+    },
+  ]);
+});
+
+test("page showchildren modifiers are stripped from preview text", () => {
+  assert.equal(getExplicitWikiLinkPreviewText("[[page:page_123?showchildren]]"), "");
+  assert.equal(
+    getExplicitWikiLinkPreviewText("[[Custom label|page:page_456]]?showchildren"),
+    "Custom label",
+  );
+  assert.equal(getExplicitWikiLinkPreviewText("[[Notes]]?showchildren"), "Notes");
+  assert.equal(getExplicitWikiLinkPreviewText("[[Journal?showchildren]]"), "Journal");
+  assert.equal(
+    replaceLinkMarkupWithLabels("Open [[Notes]]?showchildren today."),
+    "Open Notes today.",
+  );
+});
+
 test("getExplicitWikiLinkPreviewText strips showparent-inclusive node targets", () => {
   assert.equal(getExplicitWikiLinkPreviewText("[[node:node_123?showparent]]"), "");
   assert.equal(getExplicitWikiLinkPreviewText("[[node:node_123]]?showparent"), "");
