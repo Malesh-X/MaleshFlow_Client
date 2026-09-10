@@ -6,6 +6,7 @@ import { isSeparatorLineText } from "../lib/domain/displaySyntax";
 import { linkSearchScore, normalizeLinkSearchQuery } from "../lib/domain/linkSearch";
 
 const TEXT_SEARCH_NODE_CANDIDATE_LIMIT = 128;
+const EXACT_TEXT_SEARCH_NODE_CANDIDATE_LIMIT = 512;
 
 async function hydrateSearchResultParentNodes<T extends { node: Doc<"nodes"> }>(
   db: QueryCtx["db"],
@@ -106,10 +107,14 @@ export const fallbackTextSearch = internalQuery({
     pageId: v.optional(v.id("pages")),
     limit: v.number(),
     includeArchived: v.optional(v.boolean()),
+    exact: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const includeArchived = args.includeArchived === true;
-    const normalizedQuery = normalizeLinkSearchQuery(args.query);
+    const exact = args.exact === true;
+    const normalizedQuery = exact
+      ? args.query.trim().toLowerCase()
+      : normalizeLinkSearchQuery(args.query);
     if (normalizedQuery.length === 0) {
       return [];
     }
@@ -136,12 +141,16 @@ export const fallbackTextSearch = internalQuery({
           const withText = search.search("text", searchQuery).eq("archived", includeArchived);
           return args.pageId ? withText.eq("pageId", args.pageId!) : withText;
         })
-        .take(TEXT_SEARCH_NODE_CANDIDATE_LIMIT);
+        .take(
+          exact
+            ? EXACT_TEXT_SEARCH_NODE_CANDIDATE_LIMIT
+            : TEXT_SEARCH_NODE_CANDIDATE_LIMIT,
+        );
 
     addCandidates(await runSearch(normalizedQuery));
     const firstWord = normalizedQuery.split(" ")[0] ?? "";
     const prefixProbe = firstWord.slice(0, 3);
-    if (prefixProbe.length >= 2 && prefixProbe !== normalizedQuery) {
+    if (!exact && prefixProbe.length >= 2 && prefixProbe !== normalizedQuery) {
       addCandidates(await runSearch(prefixProbe));
     }
 
@@ -165,6 +174,7 @@ export const fallbackTextSearch = internalQuery({
       .filter((node) => pageMap.has(node.pageId))
       .map((node: Doc<"nodes">) => {
         const haystack = node.text.toLowerCase();
+        const exactMatchIndex = haystack.indexOf(normalizedQuery);
         const termScore = terms.reduce(
           (total, term) => (haystack.includes(term) ? total + 1 : total),
           0,
@@ -174,15 +184,25 @@ export const fallbackTextSearch = internalQuery({
         return {
           score: termScore,
           fuzzyScore,
+          exactMatchIndex,
           node,
           page: pageMap.get(node.pageId) ?? null,
           content: node.text,
         };
       })
       .filter(
-        (entry) => entry.score > 0 || entry.fuzzyScore !== Number.POSITIVE_INFINITY,
+        (entry) =>
+          exact
+            ? entry.exactMatchIndex !== -1
+            : entry.score > 0 || entry.fuzzyScore !== Number.POSITIVE_INFINITY,
       )
       .sort((left, right) => {
+        if (exact) {
+          if (left.exactMatchIndex !== right.exactMatchIndex) {
+            return left.exactMatchIndex - right.exactMatchIndex;
+          }
+          return left.node.text.trim().length - right.node.text.trim().length;
+        }
         const leftTier =
           left.fuzzyScore === Number.POSITIVE_INFINITY ? 5 : left.fuzzyScore;
         const rightTier =

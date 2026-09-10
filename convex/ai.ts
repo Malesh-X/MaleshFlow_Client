@@ -184,6 +184,7 @@ export const findNodesText = action({
     query: v.string(),
     pageId: v.optional(v.id("pages")),
     limit: v.optional(v.number()),
+    exact: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<unknown[]> => {
     assertOwnerKey(args.ownerKey);
@@ -192,6 +193,7 @@ export const findNodesText = action({
       pageId: args.pageId,
       limit: Math.max(1, Math.min(args.limit ?? 12, 20)),
       includeArchived: false,
+      exact: args.exact,
     });
   },
 });

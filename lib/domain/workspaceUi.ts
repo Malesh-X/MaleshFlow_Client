@@ -236,11 +236,64 @@ export function shouldAddSpaceAfterTagAutocomplete(
   return tokenEndIndex < value.length && /[A-Za-z0-9_]/.test(value.charAt(tokenEndIndex));
 }
 
+function splitFindQueryText(query: string) {
+  const segments: string[] = [];
+  let current = "";
+  let isQuoted = false;
+  let isEscaped = false;
+
+  for (let index = 0; index < query.length; index += 1) {
+    const character = query[index]!;
+    if (character === "\\" && isQuoted && !isEscaped) {
+      isEscaped = true;
+      current += character;
+      continue;
+    }
+    if (character === '"' && !isEscaped) {
+      isQuoted = !isQuoted;
+      current += character;
+      continue;
+    }
+    if (!isQuoted && character === "|" && query[index + 1] === "|") {
+      segments.push(current);
+      current = "";
+      index += 1;
+      isEscaped = false;
+      continue;
+    }
+
+    current += character;
+    isEscaped = false;
+  }
+
+  segments.push(current);
+  return segments;
+}
+
 export function splitFindQuerySegments(query: string) {
-  return query
-    .split("||")
+  return splitFindQueryText(query)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0);
+}
+
+export function parseFindQuerySegments(query: string) {
+  return splitFindQuerySegments(query)
+    .map((segment) => {
+      const isExact = segment.length >= 2 && segment.startsWith('"') && segment.endsWith('"');
+      const text = isExact
+        ? segment.slice(1, -1).replace(/\\(["\\])/g, "$1").trim()
+        : segment;
+      return {
+        query: text,
+        exact: isExact,
+      };
+    })
+    .filter((segment) => segment.query.length > 0);
+}
+
+export function buildExactFindQuery(value: string) {
+  const escapedValue = value.trim().replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return escapedValue ? `"${escapedValue}"` : "";
 }
 
 export function buildPageBacklinkFindQuery(page: Pick<CommandPalettePage, "_id" | "title">) {

@@ -93,12 +93,13 @@ import {
 } from "@/lib/domain/tags";
 import {
   buildPageBacklinkFindQuery,
+  buildExactFindQuery,
   buildNodeSelectionIds,
   filterPageAndFavoriteResultsForCommandPalette,
   getActiveLinkAutocompleteToken as getActiveLinkToken,
   getActiveTagAutocompleteToken as getActiveTagToken,
   shouldAddSpaceAfterTagAutocomplete,
-  splitFindQuerySegments,
+  parseFindQuerySegments,
 } from "@/lib/domain/workspaceUi";
 import {
   readWorkspacePanelLocation,
@@ -11113,7 +11114,7 @@ function ConfiguredWorkspace({
     }
 
     const normalizedQuery = paletteQuery.trim();
-    const querySegments = splitFindQuerySegments(normalizedQuery);
+    const querySegments = parseFindQuerySegments(normalizedQuery);
     if (querySegments.length === 0) {
       setTextSearchResults([]);
       setIsTextSearchLoading(false);
@@ -11128,7 +11129,8 @@ function ConfiguredWorkspace({
           querySegments.map(async (querySegment) =>
             ((await findNodesText({
               ownerKey,
-              query: querySegment,
+              query: querySegment.query,
+              exact: querySegment.exact,
               limit: 12,
             })) as unknown[]),
           ),
@@ -11142,7 +11144,7 @@ function ConfiguredWorkspace({
           resultGroups.flatMap((results, segmentIndex) =>
             withFindResultKeys(
               normalizeNodeSearchResults(results),
-              querySegments[segmentIndex] ?? "",
+              querySegments[segmentIndex]?.query ?? "",
               segmentIndex,
             ),
           ),
@@ -13545,7 +13547,7 @@ function ConfiguredWorkspace({
                             <button
                               key={tag.normalizedValue}
                               type="button"
-                              onClick={() => openFindPaletteForQuery(tag.label)}
+                              onClick={() => openFindPaletteForQuery(buildExactFindQuery(tag.label))}
                               className="inline-flex items-center gap-2 border border-[var(--workspace-border-control)] px-2 py-1 text-left text-xs text-[var(--workspace-brand)] underline decoration-[1.5px] underline-offset-[3px] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-brand-hover)]"
                             >
                               <span>{tag.label}</span>
@@ -15392,7 +15394,7 @@ function ConfiguredWorkspace({
                           ? "Choose a destination page..."
                           : "Search pages and favorites..."
                         : paletteMode === "find"
-                          ? "Find exact text in notes and tasks... Use || for OR"
+                          ? "Find text... Use quotes for exact matches or || for OR"
                         : paletteMode === "nodes"
                             ? "Search notes and tasks semantically across the workspace..."
                             : paletteMode === "overdueTasks"
@@ -15468,7 +15470,7 @@ function ConfiguredWorkspace({
                 )
               ) : paletteMode === "find" ? paletteQuery.trim().length === 0 ? (
                 <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
-                  Find plain text across all active notes and tasks in all pages. Use <span className="font-mono">||</span> for OR queries.
+                  Find text across all active notes and tasks. Wrap a phrase in <span className="font-mono">&quot;quotes&quot;</span> for an exact match, or use <span className="font-mono">||</span> for OR queries.
                 </p>
               ) : isTextSearchLoading && textSearchResults.length === 0 ? (
                 <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">Finding text…</p>
@@ -17965,7 +17967,7 @@ function LinkedTextPreview({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              onOpenTag(segment.text);
+              onOpenTag(buildExactFindQuery(segment.text));
             }}
             className={getTagPreviewClass({ interactive: true, isCompleted })}
             style={getInlinePreviewStyle({

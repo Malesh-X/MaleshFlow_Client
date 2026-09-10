@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildExactFindQuery,
   buildPageBacklinkFindQuery,
   buildNodeSelectionIds,
   filterPageAndFavoriteResultsForCommandPalette,
   filterPagesForCommandPalette,
   getActiveLinkAutocompleteToken,
   getActiveTagAutocompleteToken,
+  parseFindQuerySegments,
   shouldAddSpaceAfterTagAutocomplete,
   splitFindQuerySegments,
 } from "../lib/domain/workspaceUi";
@@ -395,6 +397,22 @@ test("splitFindQuerySegments splits OR queries and ignores empty segments", () =
     splitFindQuerySegments(" page:abc || [[Launch Page]] ||  || [[Other]] "),
     ["page:abc", "[[Launch Page]]", "[[Other]]"],
   );
+});
+
+test("parseFindQuerySegments marks fully quoted segments as exact", () => {
+  assert.deepEqual(
+    parseFindQuerySegments(' "#malesh/studios" || loose words || "text with || inside" '),
+    [
+      { query: "#malesh/studios", exact: true },
+      { query: "loose words", exact: false },
+      { query: "text with || inside", exact: true },
+    ],
+  );
+});
+
+test("buildExactFindQuery quotes and escapes literal find text", () => {
+  assert.equal(buildExactFindQuery("#malesh/studios"), '"#malesh/studios"');
+  assert.equal(buildExactFindQuery('say "hello"'), '"say \\"hello\\""');
 });
 
 test("buildPageBacklinkFindQuery combines page id and wiki title", () => {
