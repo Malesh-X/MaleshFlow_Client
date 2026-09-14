@@ -2096,11 +2096,18 @@ test("planner sidebar date range tasks skip middle planner days", () => {
 
   assert.equal(
     buildPlannerLinkedTaskCopyText(nodes[1] as never, rangeStart),
-    "[[node:range-task]] (begins)",
+    "[[node:range-task]]?hidetags (begins)",
   );
   assert.equal(
     buildPlannerLinkedTaskCopyText(nodes[1] as never, rangeEnd),
-    "[[node:range-task]] (ends)",
+    "[[node:range-task]]?hidetags (ends)",
+  );
+  assert.equal(
+    buildPlannerLinkedTaskCopyText(
+      { ...nodes[1], dueEndAt: rangeStart } as never,
+      rangeStart,
+    ),
+    "[[node:range-task]]?hidetags",
   );
 });
 
