@@ -1026,7 +1026,7 @@ export function buildPlannerLinkedTaskCopyText(
     dueAt: sourceTask.dueAt,
     dueEndAt: sourceTask.dueEndAt ?? null,
   });
-  return `[[node:${sourceTask._id}]]?hidetags${boundary ? ` (${boundary})` : ""}`;
+  return `[[node:${sourceTask._id}?hidetags]]${boundary ? ` (${boundary})` : ""}`;
 }
 
 export async function listEligiblePlannerSourceTasks(
