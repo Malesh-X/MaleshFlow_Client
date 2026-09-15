@@ -34,6 +34,19 @@ test("workspace panel locations round-trip without losing the page", () => {
     nodeId: "node_456",
   });
 
+  writeWorkspacePanelLocation(searchParams, {
+    kind: "palette",
+    mode: "waitingTasks",
+    nodeId: null,
+  });
+  assert.equal(searchParams.get("panel"), "waiting");
+  assert.equal(searchParams.get("panelNode"), null);
+  assert.deepEqual(readWorkspacePanelLocation(searchParams), {
+    kind: "palette",
+    mode: "waitingTasks",
+    nodeId: null,
+  });
+
   writeWorkspacePanelLocation(searchParams, { kind: "aiChat" });
   assert.deepEqual(readWorkspacePanelLocation(searchParams), { kind: "aiChat" });
   assert.equal(searchParams.get("panelNode"), null);

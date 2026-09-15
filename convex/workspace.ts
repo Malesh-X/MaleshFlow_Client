@@ -85,7 +85,7 @@ import {
   rewriteMatchingPageWikiLinks,
   rewritePlainPageWikiLinksToTarget,
 } from "../lib/domain/links";
-import { extractTagMatches } from "../lib/domain/tags";
+import { extractTagMatches, textHasTag } from "../lib/domain/tags";
 import {
   isSeparatorLineText,
   stripNodeDisplaySyntaxMarkers,
@@ -4486,6 +4486,49 @@ export const listOverdueTasks = query({
 
     const results = await Promise.all(
       overdueTasks.map(async (task) => {
+        const page = await ctx.db.get(task.pageId);
+        if (!page || page.archived) {
+          return null;
+        }
+        const parentNode = task.parentNodeId ? await ctx.db.get(task.parentNodeId) : null;
+        return {
+          node: task,
+          page,
+          parentNode: parentNode && !parentNode.archived ? parentNode : null,
+        };
+      }),
+    );
+
+    return results.filter((result): result is NonNullable<typeof result> => result !== null);
+  },
+});
+
+export const listWaitingTasks = query({
+  args: {
+    ownerKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const tasks = await ctx.db
+      .query("nodes")
+      .withIndex("by_kind_status", (query) => query.eq("kind", "task"))
+      .collect();
+
+    const waitingTasks = tasks
+      .filter((task) => !task.archived)
+      .filter((task) => task.taskStatus !== "done" && task.taskStatus !== "cancelled")
+      .filter((task) => textHasTag(task.text, "waiting"))
+      .sort((left, right) => {
+        const leftDue = left.dueEndAt ?? left.dueAt ?? Number.POSITIVE_INFINITY;
+        const rightDue = right.dueEndAt ?? right.dueAt ?? Number.POSITIVE_INFINITY;
+        if (leftDue !== rightDue) {
+          return leftDue - rightDue;
+        }
+        return right.updatedAt - left.updatedAt;
+      });
+
+    const results = await Promise.all(
+      waitingTasks.map(async (task) => {
         const page = await ctx.db.get(task.pageId);
         if (!page || page.archived) {
           return null;

@@ -442,6 +442,7 @@ const PINNED_ACTION_SYMBOL_BY_KEY: Record<string, string> = {
   "number-children": "№",
   "move-selected": "↗",
   "view-overdue-tasks": "!",
+  "view-waiting-tasks": "⧖",
   "task-schedule": "◴",
   "note-date": "◌",
   "import-text": "⇥",
@@ -2228,6 +2229,8 @@ function getPaletteDocumentTitle(mode: PaletteMode): string {
       return "View Legacy";
     case "overdueTasks":
       return "Past Due Tasks";
+    case "waitingTasks":
+      return "Waiting Tasks";
     case "taskSchedule":
       return "Task Schedule";
     case "noteDate":
@@ -4503,6 +4506,12 @@ function ConfiguredWorkspace({
     api.workspace.listOverdueTasks,
     ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "overdueTasks"
       ? { ownerKey, overdueBefore: overdueTaskCutoff }
+      : SKIP,
+  ) as NodeSearchResult[] | undefined;
+  const waitingTaskQueryResults = useQuery(
+    api.workspace.listWaitingTasks,
+    ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "waitingTasks"
+      ? { ownerKey }
       : SKIP,
   ) as NodeSearchResult[] | undefined;
 
@@ -6814,6 +6823,25 @@ function ConfiguredWorkspace({
       ].some((value) => value.toLowerCase().includes(normalizedQuery));
     });
   }, [overdueTaskQueryResults, pagesById, pagesByTitle, paletteQuery]);
+  const waitingTaskResults = useMemo(() => {
+    const results = waitingTaskQueryResults ?? [];
+    const normalizedQuery = paletteQuery.trim().toLowerCase();
+    if (normalizedQuery.length === 0) {
+      return results;
+    }
+
+    return results.filter((result) =>
+      [
+        result.node.text,
+        normalizeNodeLinkPreviewDisplay(result.node.text, {
+          pagesByTitle,
+          pagesById,
+        }).text,
+        result.page?.title ?? "",
+        result.parentNode?.text ?? "",
+      ].some((value) => value.toLowerCase().includes(normalizedQuery)),
+    );
+  }, [pagesById, pagesByTitle, paletteQuery, waitingTaskQueryResults]);
   const workspaceChatMessages = workspaceKnowledgeThread?.messages ?? [];
   const embeddingProgressLabel = useMemo(() => {
     if (!embeddingRebuildProgress) {
@@ -9042,6 +9070,17 @@ function ConfiguredWorkspace({
         },
       },
       {
+        key: "view-waiting-tasks",
+        title: "View Waiting Tasks",
+        subtitle: "See every incomplete active task tagged #waiting.",
+        keywords: ["task", "tasks", "waiting", "wait", "blocked", "tag", "review"],
+        actionLabel: "Open",
+        onSelect: () => {
+          switchPaletteMode("waitingTasks");
+          setPaletteOpen(true);
+        },
+      },
+      {
         key: "task-schedule",
         title: "Set Task Schedule",
         subtitle: taskScheduleTargetNode
@@ -9315,6 +9354,8 @@ function ConfiguredWorkspace({
         ? nodeSearchResults.length
       : paletteMode === "overdueTasks"
         ? overdueTaskResults.length
+      : paletteMode === "waitingTasks"
+        ? waitingTaskResults.length
         : paletteMode === "actions"
             ? actionResults.length
             : 0;
@@ -12584,8 +12625,11 @@ function ConfiguredWorkspace({
         return;
       }
 
-      if (paletteMode === "overdueTasks") {
-        const highlighted = overdueTaskResults[paletteHighlightIndex];
+      if (paletteMode === "overdueTasks" || paletteMode === "waitingTasks") {
+        const highlighted =
+          paletteMode === "overdueTasks"
+            ? overdueTaskResults[paletteHighlightIndex]
+            : waitingTaskResults[paletteHighlightIndex];
         if (highlighted) {
           handleSelectNodeSearchResult(highlighted);
         }
@@ -15245,6 +15289,17 @@ function ConfiguredWorkspace({
                     Past Due
                   </button>
                 ) : null}
+                {paletteMode === "waitingTasks" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      switchPaletteMode("waitingTasks");
+                    }}
+                    className="border border-[var(--workspace-brand)] bg-[var(--workspace-brand)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--workspace-inverse-text)] transition"
+                  >
+                    Waiting
+                  </button>
+                ) : null}
                 {paletteMode === "archive" ? (
                   <button
                     type="button"
@@ -15399,6 +15454,8 @@ function ConfiguredWorkspace({
                             ? "Search notes and tasks semantically across the workspace..."
                             : paletteMode === "overdueTasks"
                               ? "Filter past due tasks..."
+                            : paletteMode === "waitingTasks"
+                              ? "Filter waiting tasks..."
                               : "Run a workspace action..."
                     }
                     className="w-full border-0 bg-transparent p-0 text-lg outline-none"
@@ -15621,6 +15678,57 @@ function ConfiguredWorkspace({
                         title={`Overdue since ${dueFullLabel}`}
                       >
                         {dueLabel}
+                      </span>
+                    </button>
+                  );
+                })
+              ) : paletteMode === "waitingTasks" ? typeof waitingTaskQueryResults === "undefined" ? (
+                <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
+                  Loading waiting tasks...
+                </p>
+              ) : waitingTaskResults.length === 0 ? (
+                <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
+                  {paletteQuery.trim().length > 0
+                    ? "No matching waiting tasks."
+                    : "No waiting tasks."}
+                </p>
+              ) : (
+                waitingTaskResults.map((result, index) => {
+                  const taskTitle =
+                    normalizeNodeLinkPreviewDisplay(result.node.text, {
+                      pagesByTitle,
+                      pagesById,
+                    }).text ||
+                    result.node.text ||
+                    "(empty task)";
+
+                  return (
+                    <button
+                      key={`${result.node._id}:${result.page?._id ?? "page"}:waiting`}
+                      type="button"
+                      data-palette-item-index={index}
+                      onMouseEnter={() => setPaletteHighlightIndex(index)}
+                      onClick={() => handleSelectNodeSearchResult(result)}
+                      className={clsx(
+                        "flex w-full items-start justify-between gap-3 px-5 py-3 text-left transition",
+                        index === paletteHighlightIndex
+                          ? "bg-[var(--workspace-sidebar-bg)]"
+                          : "hover:bg-[var(--workspace-surface-hover)]",
+                      )}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-[var(--workspace-text)]">
+                          {taskTitle}
+                        </span>
+                        <span className="mt-1 block text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                          {getNodeSearchResultSubtitle(result)}
+                        </span>
+                      </span>
+                      <span
+                        className="shrink-0 rounded-full border border-[var(--workspace-accent)]/50 px-2 py-1 text-[11px] uppercase tracking-[0.14em] text-[var(--workspace-accent)]"
+                        title="Tagged #waiting"
+                      >
+                        #waiting
                       </span>
                     </button>
                   );
