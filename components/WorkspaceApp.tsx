@@ -84,7 +84,12 @@ import {
   replaceLinkMarkupWithLabels,
   sanitizeGeneratedWikiLinkLabel,
 } from "@/lib/domain/links";
-import { linkSearchScore, normalizeLinkSearchQuery } from "@/lib/domain/linkSearch";
+import {
+  compareLinkAutocompletePriority,
+  isTemplateLinkPage,
+  linkSearchScore,
+  normalizeLinkSearchQuery,
+} from "@/lib/domain/linkSearch";
 import {
   extractTagMatches,
   splitEdgeTagMatches,
@@ -538,6 +543,7 @@ type LinkSuggestion =
       title: string;
       subtitle: string;
       insertText: string;
+      isTemplatePage: boolean;
       parentInsertText?: string | null;
       parentTitle?: string | null;
     }
@@ -2653,6 +2659,7 @@ function buildLinkSuggestions(
         key: `node:${entry.node._id}`,
         kind: "node" as const,
         title: sanitizeLinkLabel(entry.node.text),
+        isTemplatePage: isTemplateLinkPage(entry.page),
         subtitle: [
           "Node",
           entry.page?.title ?? "",
@@ -2665,17 +2672,13 @@ function buildLinkSuggestions(
     });
 
   return [...pageSuggestions, ...nodeSuggestions].sort((left, right) => {
-    // Better fuzzy tiers first (prefix beats word-start beats substring beats
-    // scattered matches), then shorter titles within the same tier.
-    const leftScore = linkSearchScore(left.title, normalizedQuery);
-    const rightScore = linkSearchScore(right.title, normalizedQuery);
-    if (leftScore !== rightScore) {
-      return leftScore - rightScore;
-    }
-
-    const lengthDelta = left.title.trim().length - right.title.trim().length;
-    if (lengthDelta !== 0) {
-      return lengthDelta;
+    const priority = compareLinkAutocompletePriority(
+      { title: left.title, isTemplatePage: left.kind === "node" && left.isTemplatePage },
+      { title: right.title, isTemplatePage: right.kind === "node" && right.isTemplatePage },
+      normalizedQuery,
+    );
+    if (priority !== 0) {
+      return priority;
     }
 
     if (left.kind !== right.kind) {
@@ -2728,6 +2731,7 @@ function useLinkTargetSuggestions({
           ownerKey,
           query: debouncedToken.query,
           limit: 12,
+          preferTemplatePages: true,
           ...(excludeNodeId ? { excludeNodeId } : {}),
           includeArchived: debouncedToken.includeArchived,
         }

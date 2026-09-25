@@ -62,7 +62,12 @@ import {
   createPlannerCompletionReceipt,
 } from "./lib/planner";
 import { replaceLiteralOccurrences } from "../lib/domain/findReplace";
-import { linkSearchScore, normalizeLinkSearchQuery } from "../lib/domain/linkSearch";
+import {
+  compareLinkAutocompletePriority,
+  isTemplateLinkPage,
+  linkSearchScore,
+  normalizeLinkSearchQuery,
+} from "../lib/domain/linkSearch";
 import {
   getEffectiveTaskDueDateRange,
   type PlannerCompletionReceipt,
@@ -4082,6 +4087,7 @@ export const searchLinkTargets = query({
     limit: v.optional(v.number()),
     excludeNodeId: v.optional(v.id("nodes")),
     includeArchived: v.optional(v.boolean()),
+    preferTemplatePages: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
@@ -4206,14 +4212,21 @@ export const searchLinkTargets = query({
           linkSearchScore(node.text, normalizedQuery) !== Number.POSITIVE_INFINITY,
       )
       .sort((left, right) => {
-        const leftScore = linkSearchScore(left.text, normalizedQuery);
-        const rightScore = linkSearchScore(right.text, normalizedQuery);
-        if (leftScore !== rightScore) {
-          return leftScore - rightScore;
-        }
-        const lengthDelta = left.text.trim().length - right.text.trim().length;
-        if (lengthDelta !== 0) {
-          return lengthDelta;
+        const priority = compareLinkAutocompletePriority(
+          {
+            title: left.text,
+            isTemplatePage:
+              args.preferTemplatePages === true && isTemplateLinkPage(pageMap.get(left.pageId)),
+          },
+          {
+            title: right.text,
+            isTemplatePage:
+              args.preferTemplatePages === true && isTemplateLinkPage(pageMap.get(right.pageId)),
+          },
+          normalizedQuery,
+        );
+        if (priority !== 0) {
+          return priority;
         }
         return right.updatedAt - left.updatedAt;
       });

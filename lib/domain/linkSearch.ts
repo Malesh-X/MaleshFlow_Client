@@ -12,6 +12,32 @@ export function normalizeLinkSearchQuery(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+export function isTemplateLinkPage(
+  page: { sourceMeta?: unknown } | null | undefined,
+) {
+  const meta = page?.sourceMeta;
+  return !!meta && typeof meta === "object" &&
+    (meta as Record<string, unknown>).sidebarSection === "Templates";
+}
+
+export function compareLinkAutocompletePriority(
+  left: { title: string; isTemplatePage: boolean },
+  right: { title: string; isTemplatePage: boolean },
+  query: string,
+) {
+  if (left.isTemplatePage !== right.isTemplatePage) {
+    return left.isTemplatePage ? -1 : 1;
+  }
+
+  const leftScore = linkSearchScore(left.title, query);
+  const rightScore = linkSearchScore(right.title, query);
+  if (leftScore !== rightScore) {
+    return leftScore - rightScore;
+  }
+
+  return left.title.trim().length - right.title.trim().length;
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

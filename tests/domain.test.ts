@@ -13,7 +13,12 @@ import {
   rewritePlainPageWikiLinksToTarget,
   sanitizeGeneratedWikiLinkLabel,
 } from "../lib/domain/links";
-import { linkSearchScore, normalizeLinkSearchQuery } from "../lib/domain/linkSearch";
+import {
+  compareLinkAutocompletePriority,
+  isTemplateLinkPage,
+  linkSearchScore,
+  normalizeLinkSearchQuery,
+} from "../lib/domain/linkSearch";
 import {
   cycleHeadingSyntax,
   isDimmedSyntaxLine,
@@ -1043,6 +1048,25 @@ test("linkSearchScore ranks fuzzy link autocomplete matches by tier", () => {
   assert.equal(linkSearchScore("Anything", ""), 0);
   // Normalization collapses case and extra whitespace.
   assert.equal(normalizeLinkSearchQuery("  Go   To "), "go to");
+});
+
+test("link autocomplete puts template-page items before other matches", () => {
+  const templatePage = { sourceMeta: { sidebarSection: "Templates" } };
+  const taskPage = { sourceMeta: { sidebarSection: "Tasks" } };
+  const suggestions = [
+    { title: "Draft report", isTemplatePage: isTemplateLinkPage(taskPage) },
+    { title: "Report outline", isTemplatePage: isTemplateLinkPage(templatePage) },
+    { title: "Report", isTemplatePage: isTemplateLinkPage(taskPage) },
+    { title: "Report plan", isTemplatePage: isTemplateLinkPage(templatePage) },
+  ];
+
+  suggestions.sort((left, right) => compareLinkAutocompletePriority(left, right, "report"));
+  assert.deepEqual(suggestions.map((item) => item.title), [
+    "Report plan",
+    "Report outline",
+    "Report",
+    "Draft report",
+  ]);
 });
 
 test("planner merge subtree equivalence guards duplicate archiving", () => {
