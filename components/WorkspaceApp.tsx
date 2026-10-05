@@ -2377,7 +2377,7 @@ function writeFocusedNodeToHistory(
 }
 
 function buildNodeLinkInsertText(node: Doc<"nodes">) {
-  return `[[node:${node._id}]]`;
+  return `[[node:${node._id}?hidetags]]`;
 }
 
 function getLinkSuggestionInsertText(
