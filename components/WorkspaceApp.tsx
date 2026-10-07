@@ -7289,16 +7289,19 @@ function ConfiguredWorkspace({
       cachedTags !== null ||
       isRefreshingTags ||
       !ownerKey ||
-      !isOwnerKeyValid
+      !isOwnerKeyValid ||
+      isMainPaneLoading
     ) {
       return;
     }
 
-    void handleRefreshTags();
+    const timeoutId = window.setTimeout(() => void handleRefreshTags(), 150);
+    return () => window.clearTimeout(timeoutId);
   }, [
     cachedTags,
     handleRefreshTags,
     isOwnerKeyValid,
+    isMainPaneLoading,
     isRefreshingTags,
     ownerKey,
   ]);
