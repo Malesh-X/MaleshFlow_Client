@@ -48,6 +48,8 @@ export type OptimisticNodeUpdateArgs = {
   priority?: NodeDoc["priority"];
   dueAt?: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   recurrenceFrequency?: RecurrenceFrequency | null;
 };
 
@@ -96,6 +98,8 @@ export type OptimisticNodeCreateInput = {
   taskStatus?: NodeTaskStatus;
   dueAt?: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   recurrenceFrequency?: RecurrenceFrequency | null;
 };
 
@@ -311,10 +315,22 @@ function applyNodeUpdatePatch(
 
   if (update.dueAt !== undefined) {
     nextNode.dueAt = update.dueAt;
+    if (update.dueAt === null) {
+      nextNode.dueTime = null;
+      nextNode.dueTimeZone = null;
+    }
   }
 
   if (update.dueEndAt !== undefined) {
     nextNode.dueEndAt = update.dueEndAt;
+  }
+
+  if (update.dueTime !== undefined) {
+    nextNode.dueTime = update.dueTime;
+  }
+
+  if (update.dueTimeZone !== undefined) {
+    nextNode.dueTimeZone = update.dueTimeZone;
   }
 
   if (isSeparatorNote) {
@@ -323,6 +339,13 @@ function applyNodeUpdatePatch(
     nextNode.priority = null;
     nextNode.dueAt = null;
     nextNode.dueEndAt = null;
+    nextNode.dueTime = null;
+    nextNode.dueTimeZone = null;
+  }
+
+  if (nextKind !== "task") {
+    nextNode.dueTime = null;
+    nextNode.dueTimeZone = null;
   }
 
   if (
@@ -553,6 +576,8 @@ function applyOptimisticCreatesToNodes(
       priority: null,
       dueAt: kind === "task" ? (entry.dueAt ?? null) : null,
       dueEndAt: kind === "task" ? (entry.dueEndAt ?? null) : null,
+      dueTime: kind === "task" ? (entry.dueTime ?? null) : null,
+      dueTimeZone: kind === "task" ? (entry.dueTimeZone ?? null) : null,
       archived: false,
       sourceMeta: {
         sourceType: "manual",

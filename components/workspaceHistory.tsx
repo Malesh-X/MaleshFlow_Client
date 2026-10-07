@@ -28,6 +28,8 @@ export type NodeValueSnapshot = {
   noteCompleted: boolean;
   dueAt?: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   recurrenceFrequency?: RecurrenceFrequency;
 };
 
@@ -145,6 +147,8 @@ type UpdateNodeFn = (args: {
   noteCompleted?: boolean;
   dueAt?: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   recurrenceFrequency?: RecurrenceFrequency;
 }) => Promise<unknown>;
 
@@ -680,6 +684,8 @@ export function useWorkspaceHistoryController({
             noteCompleted: nextSnapshot.noteCompleted,
             dueAt: nextSnapshot.dueAt,
             dueEndAt: nextSnapshot.dueEndAt,
+            dueTime: nextSnapshot.dueTime,
+            dueTimeZone: nextSnapshot.dueTimeZone,
             recurrenceFrequency: nextSnapshot.recurrenceFrequency,
           });
           syncCommittedValue(entry.focusEditorId, nextSnapshot.text, {

@@ -662,6 +662,8 @@ type OutlineClipboardNode = {
   noteCompleted: boolean;
   dueAt?: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   recurrenceFrequency?: RecurrenceFrequency;
   lockKind: boolean;
   children: OutlineClipboardNode[];
@@ -833,6 +835,8 @@ type OutlineClipboardBatchEntry = {
   noteCompleted?: boolean;
   dueAt?: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   recurrenceFrequency?: RecurrenceFrequency;
   lockKind?: boolean;
 };
@@ -880,6 +884,8 @@ type TreeNode = OutlineTreeNode<{
   priority: string | null;
   dueAt: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   archived: boolean;
   sourceMeta?: Record<string, unknown> | null;
 }>;
@@ -891,6 +897,8 @@ type SchedulePaletteNode = {
   taskStatus: "todo" | "in_progress" | "done" | "cancelled" | null;
   dueAt: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   sourceMeta?: Record<string, unknown> | null;
 };
 type FocusedOutlineContextValue = {
@@ -932,6 +940,8 @@ function toSchedulePaletteNode(node: TreeNode): SchedulePaletteNode | null {
     taskStatus: isValidClipboardTaskStatus(node.taskStatus) ? node.taskStatus : null,
     dueAt: node.dueAt ?? null,
     dueEndAt: node.dueEndAt ?? null,
+    dueTime: node.dueTime ?? null,
+    dueTimeZone: node.dueTimeZone ?? null,
     sourceMeta: node.sourceMeta ?? null,
   };
 }
@@ -2029,12 +2039,16 @@ function withNodeScheduleSnapshot(
         kind: string;
         dueAt?: number | null;
         dueEndAt?: number | null;
+        dueTime?: string | null;
+        dueTimeZone?: string | null;
         sourceMeta?: Record<string, unknown> | null;
       }
     | {
         kind: string;
         dueAt?: number | null;
         dueEndAt?: number | null;
+        dueTime?: string | null;
+        dueTimeZone?: string | null;
         recurrenceFrequency?: RecurrenceFrequency;
       },
 ): NodeValueSnapshot {
@@ -2044,6 +2058,8 @@ function withNodeScheduleSnapshot(
       taskStatus: null,
       dueAt: ("dueAt" in source ? (source.dueAt ?? null) : null),
       dueEndAt: ("dueEndAt" in source ? (source.dueEndAt ?? null) : null),
+      dueTime: null,
+      dueTimeZone: null,
       recurrenceFrequency: null,
     };
   }
@@ -2054,6 +2070,8 @@ function withNodeScheduleSnapshot(
     dueAt: snapshot.dueAt ?? ("dueAt" in source ? (source.dueAt ?? null) : null),
     dueEndAt:
       snapshot.dueEndAt ?? ("dueEndAt" in source ? (source.dueEndAt ?? null) : null),
+    dueTime: snapshot.dueTime ?? ("dueTime" in source ? (source.dueTime ?? null) : null),
+    dueTimeZone: snapshot.dueTimeZone ?? ("dueTimeZone" in source ? (source.dueTimeZone ?? null) : null),
     recurrenceFrequency:
       snapshot.recurrenceFrequency ?? getNodeRecurrenceFrequency(source),
   };
@@ -2063,6 +2081,7 @@ function getTaskScheduleSummary(task: {
   kind: string;
   dueAt: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
   sourceMeta?: Record<string, unknown> | null;
 }, effectiveDueRange?: { dueAt: number | null; dueEndAt: number | null }) {
   if (task.kind !== "task") {
@@ -2073,7 +2092,7 @@ function getTaskScheduleSummary(task: {
   const dueAt = effectiveDueRange?.dueAt ?? task.dueAt;
   const dueEndAt = effectiveDueRange?.dueEndAt ?? task.dueEndAt ?? null;
   if (dueAt) {
-    parts.push(formatDueDateRange(dueAt, dueEndAt));
+    parts.push(`${formatDueDateRange(dueAt, dueEndAt)}${task.dueTime ? ` at ${task.dueTime}` : ""}`);
   }
 
   const recurrenceFrequency = getNodeRecurrenceFrequency(task);
@@ -3352,6 +3371,12 @@ function isOutlineClipboardNode(value: unknown): value is OutlineClipboardNode {
     (record.dueEndAt === undefined ||
       typeof record.dueEndAt === "number" ||
       record.dueEndAt === null) &&
+    (record.dueTime === undefined ||
+      record.dueTime === null ||
+      (typeof record.dueTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(record.dueTime))) &&
+    (record.dueTimeZone === undefined ||
+      record.dueTimeZone === null ||
+      typeof record.dueTimeZone === "string") &&
     (record.recurrenceFrequency === undefined ||
       record.recurrenceFrequency === null ||
       parseRecurrenceFrequency(record.recurrenceFrequency) !== null) &&
@@ -3461,6 +3486,8 @@ function serializeTreeNodeForClipboard(node: TreeNode): OutlineClipboardNode {
     noteCompleted: nodeMeta.noteCompleted === true,
     dueAt: node.dueAt ?? null,
     dueEndAt: node.dueEndAt ?? null,
+    dueTime: node.dueTime ?? null,
+    dueTimeZone: node.dueTimeZone ?? null,
     recurrenceFrequency: getNodeRecurrenceFrequency(node),
     lockKind: nodeMeta.taskKindLocked === true,
     children: node.children.map((child) => serializeTreeNodeForClipboard(child)),
@@ -3546,6 +3573,8 @@ function flattenOutlineClipboardNodesForBatch(
       noteCompleted: node.noteCompleted,
       dueAt: node.dueAt,
       dueEndAt: node.dueEndAt,
+      dueTime: node.dueTime,
+      dueTimeZone: node.dueTimeZone,
       recurrenceFrequency: node.recurrenceFrequency,
       lockKind: node.lockKind,
     });
@@ -3912,8 +3941,8 @@ function insertTextIntoDraft(
 
 function toNodeValueSnapshot(
   value:
-    | Pick<Doc<"nodes">, "text" | "kind" | "taskStatus" | "dueAt" | "dueEndAt">
-    | Pick<Doc<"nodes">, "text" | "kind" | "taskStatus" | "dueAt" | "dueEndAt" | "sourceMeta">
+    | Pick<Doc<"nodes">, "text" | "kind" | "taskStatus" | "dueAt" | "dueEndAt" | "dueTime" | "dueTimeZone">
+    | Pick<Doc<"nodes">, "text" | "kind" | "taskStatus" | "dueAt" | "dueEndAt" | "dueTime" | "dueTimeZone" | "sourceMeta">
     | {
         text: string;
         kind: "note" | "task";
@@ -3921,6 +3950,8 @@ function toNodeValueSnapshot(
         noteCompleted?: boolean;
         dueAt?: number | null;
         dueEndAt?: number | null;
+        dueTime?: string | null;
+        dueTimeZone?: string | null;
         recurrenceFrequency?: RecurrenceFrequency;
       },
 ): NodeValueSnapshot {
@@ -3935,6 +3966,8 @@ function toNodeValueSnapshot(
     ),
     dueAt: "dueAt" in value ? (value.dueAt ?? null) : null,
     dueEndAt: "dueEndAt" in value ? (value.dueEndAt ?? null) : null,
+    dueTime: "dueTime" in value ? (value.dueTime ?? null) : null,
+    dueTimeZone: "dueTimeZone" in value ? (value.dueTimeZone ?? null) : null,
     recurrenceFrequency: getNodeRecurrenceFrequency(
       value as
         | Pick<Doc<"nodes">, "kind" | "sourceMeta">
@@ -8468,10 +8501,14 @@ function ConfiguredWorkspace({
   const handleSaveTaskSchedule = useCallback(async ({
     dueAt,
     dueEndAt,
+    dueTime,
+    dueTimeZone,
     recurrenceFrequency,
   }: {
     dueAt: number | null;
     dueEndAt: number | null;
+    dueTime: string | null;
+    dueTimeZone: string | null;
     recurrenceFrequency: RecurrenceFrequency;
   }) => {
     const node = taskScheduleTargetNode;
@@ -8487,6 +8524,8 @@ function ConfiguredWorkspace({
       noteCompleted: false,
       dueAt,
       dueEndAt,
+      dueTime,
+      dueTimeZone,
       recurrenceFrequency,
     };
 
@@ -8497,6 +8536,8 @@ function ConfiguredWorkspace({
       beforeSnapshot.noteCompleted === afterSnapshot.noteCompleted &&
       beforeSnapshot.dueAt === afterSnapshot.dueAt &&
       beforeSnapshot.dueEndAt === afterSnapshot.dueEndAt &&
+      beforeSnapshot.dueTime === afterSnapshot.dueTime &&
+      beforeSnapshot.dueTimeZone === afterSnapshot.dueTimeZone &&
       areRecurrenceFrequenciesEqual(
         beforeSnapshot.recurrenceFrequency ?? null,
         afterSnapshot.recurrenceFrequency ?? null,
@@ -8514,6 +8555,8 @@ function ConfiguredWorkspace({
       noteCompleted: false,
       dueAt: afterSnapshot.dueAt,
       dueEndAt: afterSnapshot.dueEndAt,
+      dueTime: afterSnapshot.dueTime,
+      dueTimeZone: afterSnapshot.dueTimeZone,
       recurrenceFrequency: afterSnapshot.recurrenceFrequency,
     });
 
@@ -15867,6 +15910,8 @@ function ConfiguredWorkspace({
                     taskTitle={taskScheduleTargetNode.text}
                     dueAt={taskScheduleEffectiveDueRange.dueAt}
                     dueEndAt={taskScheduleEffectiveDueRange.dueEndAt}
+                    dueTime={taskScheduleTargetNode.dueTime ?? null}
+                    dueTimeZone={taskScheduleTargetNode.dueTimeZone ?? null}
                     recurrenceFrequency={getNodeRecurrenceFrequency(taskScheduleTargetNode)}
                     recurringCompletionMode={recurringCompletionMode}
                     onRecurringCompletionModeChange={setRecurringCompletionMode}
@@ -19683,11 +19728,11 @@ function OutlineNodeEditor({
   );
   const dueDateFullLabel =
     node.kind === "task"
-      ? formatDueDateRange(effectiveDueRange.dueAt, effectiveDueRange.dueEndAt ?? null)
+      ? `${formatDueDateRange(effectiveDueRange.dueAt, effectiveDueRange.dueEndAt ?? null)}${node.dueTime ? ` at ${node.dueTime}` : ""}`
       : "";
   const dueDateLabel =
     node.kind === "task"
-      ? formatCompactDueDateRange(effectiveDueRange.dueAt, effectiveDueRange.dueEndAt ?? null)
+      ? `${formatCompactDueDateRange(effectiveDueRange.dueAt, effectiveDueRange.dueEndAt ?? null)}${node.dueTime ? ` ${node.dueTime}` : ""}`
       : "";
   const noteDateFullLabel =
     node.kind === "note" && node.dueAt

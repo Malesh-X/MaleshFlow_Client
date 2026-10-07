@@ -247,6 +247,8 @@ export const getTaskCalendarFeedByToken = internalQuery({
           }),
           dueAt: node.dueAt,
           dueEndAt: node.dueEndAt ?? null,
+          dueTime: node.dueTime ?? null,
+          dueTimeZone: node.dueTimeZone ?? null,
           updatedAt: node.updatedAt,
           categories: tags,
         });

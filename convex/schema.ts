@@ -36,6 +36,8 @@ export default defineSchema({
     priority: priorityValidator,
     dueAt: v.union(v.number(), v.null()),
     dueEndAt: v.optional(v.union(v.number(), v.null())),
+    dueTime: v.optional(v.union(v.string(), v.null())),
+    dueTimeZone: v.optional(v.union(v.string(), v.null())),
     archived: v.boolean(),
     sourceMeta: v.optional(v.any()),
     createdAt: v.number(),

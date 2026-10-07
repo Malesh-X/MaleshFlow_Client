@@ -12,6 +12,8 @@ export type OutlineNodeLike = {
   priority: string | null;
   dueAt: number | null;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   archived: boolean;
   sourceMeta?: Record<string, unknown> | null;
   createdAt?: number;

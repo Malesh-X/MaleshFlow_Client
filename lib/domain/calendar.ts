@@ -11,6 +11,8 @@ export type TaskCalendarFeedEvent = {
   description?: string;
   dueAt: number;
   dueEndAt?: number | null;
+  dueTime?: string | null;
+  dueTimeZone?: string | null;
   updatedAt: number;
   categories?: string[];
 };
@@ -72,6 +74,45 @@ function formatIcsDateValue(timestamp: number) {
   return timestampToDateInputValue(timestamp).replaceAll("-", "");
 }
 
+function getTimeZoneParts(timestamp: number, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(timestamp);
+  const part = (type: string) => Number(parts.find((value) => value.type === type)?.value);
+  return {
+    year: part("year"),
+    month: part("month"),
+    day: part("day"),
+    hour: part("hour"),
+    minute: part("minute"),
+  };
+}
+
+function getTimedEventStart(dateTimestamp: number, time: string, timeZone: string) {
+  const [hour, minute] = time.split(":").map(Number);
+  const { year, month, day } = getTimeZoneParts(dateTimestamp, timeZone);
+  const wallTimestamp = Date.UTC(year, month - 1, day, hour, minute);
+  let timestamp = wallTimestamp;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = getTimeZoneParts(timestamp, timeZone);
+    const currentWallTimestamp = Date.UTC(
+      current.year, current.month - 1, current.day, current.hour, current.minute,
+    );
+    const adjustment = wallTimestamp - currentWallTimestamp;
+    timestamp += adjustment;
+    if (adjustment === 0) {
+      break;
+    }
+  }
+  return timestamp;
+}
+
 export function normalizeCalendarTaskText(text: string) {
   return replaceLinkMarkupWithLabels(text)
     .replace(/^\s*#{1,6}\s+/g, "")
@@ -123,8 +164,25 @@ export function buildTaskCalendarIcs(feed: TaskCalendarFeed) {
     lines.push(`DTSTAMP:${formatUtcIcsTimestamp(event.updatedAt)}`);
     lines.push(`LAST-MODIFIED:${formatUtcIcsTimestamp(event.updatedAt)}`);
     lines.push(`SUMMARY:${escapeIcsText(event.summary)}`);
-    lines.push(`DTSTART;VALUE=DATE:${formatIcsDateValue(event.dueAt)}`);
-    lines.push(`DTEND;VALUE=DATE:${formatIcsDateValue(exclusiveEnd)}`);
+    let timedRange: { start: number; end: number } | null = null;
+    if (event.dueTime && /^([01]\d|2[0-3]):[0-5]\d$/.test(event.dueTime) && event.dueTimeZone) {
+      try {
+        const start = getTimedEventStart(event.dueAt, event.dueTime, event.dueTimeZone);
+        const end = dueEndAt > event.dueAt
+          ? getTimedEventStart(dueEndAt, event.dueTime, event.dueTimeZone) + 60 * 60 * 1000
+          : start + 60 * 60 * 1000;
+        timedRange = { start, end };
+      } catch {
+        // Invalid stored time zones should not break the entire subscribed feed.
+      }
+    }
+    if (timedRange) {
+      lines.push(`DTSTART:${formatUtcIcsTimestamp(timedRange.start)}`);
+      lines.push(`DTEND:${formatUtcIcsTimestamp(timedRange.end)}`);
+    } else {
+      lines.push(`DTSTART;VALUE=DATE:${formatIcsDateValue(event.dueAt)}`);
+      lines.push(`DTEND;VALUE=DATE:${formatIcsDateValue(exclusiveEnd)}`);
+    }
 
     if (event.description) {
       lines.push(`DESCRIPTION:${escapeIcsText(event.description)}`);

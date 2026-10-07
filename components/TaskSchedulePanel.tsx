@@ -20,12 +20,16 @@ type TaskSchedulePanelProps = {
   taskTitle: string;
   dueAt: number | null;
   dueEndAt: number | null;
+  dueTime: string | null;
+  dueTimeZone: string | null;
   recurrenceFrequency: RecurrenceFrequency;
   recurringCompletionMode: RecurringCompletionMode;
   onRecurringCompletionModeChange: (mode: RecurringCompletionMode) => void;
   onSave: (args: {
     dueAt: number | null;
     dueEndAt: number | null;
+    dueTime: string | null;
+    dueTimeZone: string | null;
     recurrenceFrequency: RecurrenceFrequency;
   }) => Promise<void>;
   onSaved: () => void;
@@ -35,6 +39,8 @@ export function TaskSchedulePanel({
   taskTitle,
   dueAt,
   dueEndAt,
+  dueTime,
+  dueTimeZone,
   recurrenceFrequency,
   recurringCompletionMode,
   onRecurringCompletionModeChange,
@@ -43,6 +49,7 @@ export function TaskSchedulePanel({
 }: TaskSchedulePanelProps) {
   const [dueDateDraft, setDueDateDraft] = useState("");
   const [dueEndDateDraft, setDueEndDateDraft] = useState("");
+  const [dueTimeDraft, setDueTimeDraft] = useState("");
   const [recurrenceModeDraft, setRecurrenceModeDraft] = useState<RecurrencePreset | "custom" | "">("");
   const [customIntervalDraft, setCustomIntervalDraft] = useState("");
   const [customUnitDraft, setCustomUnitDraft] = useState<RecurrenceUnit>("day");
@@ -52,6 +59,7 @@ export function TaskSchedulePanel({
   useEffect(() => {
     setDueDateDraft(timestampToDateInputValue(dueAt));
     setDueEndDateDraft(timestampToDateInputValue(dueEndAt));
+    setDueTimeDraft(dueTime ?? "");
     if (!recurrenceFrequency) {
       setRecurrenceModeDraft("");
       setCustomIntervalDraft("");
@@ -66,7 +74,7 @@ export function TaskSchedulePanel({
       setCustomUnitDraft(recurrenceFrequency.unit);
     }
     setErrorMessage("");
-  }, [dueAt, dueEndAt, recurrenceFrequency, taskTitle]);
+  }, [dueAt, dueEndAt, dueTime, recurrenceFrequency, taskTitle]);
 
   const recurrenceDraft = useMemo<RecurrenceFrequency>(() => {
     if (recurrenceModeDraft === "") {
@@ -94,14 +102,14 @@ export function TaskSchedulePanel({
     const draftDueEndAt = dateInputValueToTimestamp(dueEndDateDraft);
     if (draftDueAt) {
       parts.push(
-        `Due ${draftDueEndAt && draftDueEndAt > draftDueAt ? `${formatDueDate(draftDueAt)} - ${formatDueDate(draftDueEndAt)}` : formatDueDate(draftDueAt)}`,
+        `Due ${draftDueEndAt && draftDueEndAt > draftDueAt ? `${formatDueDate(draftDueAt)} - ${formatDueDate(draftDueEndAt)}` : formatDueDate(draftDueAt)}${dueTimeDraft ? ` at ${dueTimeDraft}` : ""}`,
       );
     }
     if (recurrenceDraft) {
       parts.push(getRecurrenceLabel(recurrenceDraft));
     }
     return parts.join(" • ");
-  }, [dueDateDraft, dueEndDateDraft, recurrenceDraft]);
+  }, [dueDateDraft, dueEndDateDraft, dueTimeDraft, recurrenceDraft]);
 
   const handleSave = async () => {
     const nextDueAt = dateInputValueToTimestamp(dueDateDraft);
@@ -116,6 +124,11 @@ export function TaskSchedulePanel({
       return;
     }
 
+    if (dueTimeDraft && !nextDueAt) {
+      setErrorMessage("Choose a start date before adding a time.");
+      return;
+    }
+
     if (nextDueAt && nextDueEndAt && nextDueEndAt < nextDueAt) {
       setErrorMessage("The end date should be on or after the start date.");
       return;
@@ -127,6 +140,10 @@ export function TaskSchedulePanel({
       await onSave({
         dueAt: nextDueAt,
         dueEndAt: nextDueAt && nextDueEndAt && nextDueEndAt > nextDueAt ? nextDueEndAt : null,
+        dueTime: dueTimeDraft || null,
+        dueTimeZone: dueTimeDraft
+          ? dueTimeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+          : null,
         recurrenceFrequency: recurrenceDraft,
       });
       onSaved();
@@ -146,10 +163,13 @@ export function TaskSchedulePanel({
       await onSave({
         dueAt: null,
         dueEndAt: null,
+        dueTime: null,
+        dueTimeZone: null,
         recurrenceFrequency: null,
       });
       setDueDateDraft("");
       setDueEndDateDraft("");
+      setDueTimeDraft("");
       setRecurrenceModeDraft("");
       setCustomIntervalDraft("");
       setCustomUnitDraft("day");
@@ -189,8 +209,26 @@ export function TaskSchedulePanel({
             <input
               type="date"
               value={dueDateDraft}
-              onChange={(event) => setDueDateDraft(event.target.value)}
+              onChange={(event) => {
+                setDueDateDraft(event.target.value);
+                if (!event.target.value) {
+                  setDueTimeDraft("");
+                }
+              }}
               className="mt-3 w-full border border-[var(--workspace-border)] bg-transparent px-3 py-2 text-sm outline-none transition focus:border-[var(--workspace-accent)]"
+            />
+          </label>
+
+          <label className="block">
+            <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+              Time (optional)
+            </span>
+            <input
+              type="time"
+              value={dueTimeDraft}
+              onChange={(event) => setDueTimeDraft(event.target.value)}
+              disabled={!dueDateDraft}
+              className="mt-3 w-full border border-[var(--workspace-border)] bg-transparent px-3 py-2 text-sm outline-none transition focus:border-[var(--workspace-accent)] disabled:opacity-50"
             />
           </label>
 
@@ -339,6 +377,7 @@ export function TaskSchedulePanel({
               isSaving ||
               (!dueDateDraft &&
                 !dueEndDateDraft &&
+                !dueTimeDraft &&
                 recurrenceModeDraft === "" &&
                 customIntervalDraft.length === 0)
             }

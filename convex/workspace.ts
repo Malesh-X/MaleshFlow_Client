@@ -1982,6 +1982,8 @@ const nodeCreateInputValidator = v.object({
   taskStatus: v.optional(taskStatusValidator),
   dueAt: v.optional(v.union(v.number(), v.null())),
   dueEndAt: v.optional(v.union(v.number(), v.null())),
+  dueTime: v.optional(v.union(v.string(), v.null())),
+  dueTimeZone: v.optional(v.union(v.string(), v.null())),
   recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
 });
 
@@ -5780,6 +5782,8 @@ export const createNodesBatch = mutation({
         priority: null,
         dueAt: kind === "task" ? (entry.dueAt ?? null) : null,
         dueEndAt: kind === "task" ? (entry.dueEndAt ?? null) : null,
+        dueTime: kind === "task" ? (entry.dueTime ?? null) : null,
+        dueTimeZone: kind === "task" ? (entry.dueTimeZone ?? null) : null,
         archived: false,
         sourceMeta: {
           sourceType: "manual",
@@ -5828,6 +5832,8 @@ export const updateNode = mutation({
     priority: v.optional(priorityValidator),
     dueAt: v.optional(v.union(v.number(), v.null())),
     dueEndAt: v.optional(v.union(v.number(), v.null())),
+    dueTime: v.optional(v.union(v.string(), v.null())),
+    dueTimeZone: v.optional(v.union(v.string(), v.null())),
     recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
   },
   handler: async (ctx, args) => {
@@ -5868,10 +5874,32 @@ export const updateNode = mutation({
 
     if (args.dueAt !== undefined) {
       patch.dueAt = args.dueAt;
+      if (args.dueAt === null) {
+        patch.dueTime = null;
+        patch.dueTimeZone = null;
+      }
     }
 
     if (args.dueEndAt !== undefined) {
       patch.dueEndAt = args.dueEndAt;
+    }
+
+    if (args.dueTime !== undefined || args.dueTimeZone !== undefined) {
+      if (args.dueTime && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(args.dueTime) || !args.dueTimeZone)) {
+        throw new Error("A scheduled time needs a valid time and time zone.");
+      }
+      if (args.dueTime && !(args.dueAt ?? node.dueAt)) {
+        throw new Error("Choose a due date before setting a time.");
+      }
+      if (args.dueTimeZone) {
+        try {
+          new Intl.DateTimeFormat("en-US", { timeZone: args.dueTimeZone });
+        } catch {
+          throw new Error("Invalid task schedule time zone.");
+        }
+      }
+      patch.dueTime = args.dueTime ?? null;
+      patch.dueTimeZone = args.dueTime ? args.dueTimeZone : null;
     }
 
     if (isSeparatorNote) {
@@ -5880,6 +5908,13 @@ export const updateNode = mutation({
       patch.priority = null;
       patch.dueAt = null;
       patch.dueEndAt = null;
+      patch.dueTime = null;
+      patch.dueTimeZone = null;
+    }
+
+    if (nextKind !== "task") {
+      patch.dueTime = null;
+      patch.dueTimeZone = null;
     }
 
     if (
@@ -5996,6 +6031,10 @@ export const updateNodesBatch = mutation({
 
       if (update.dueAt !== undefined) {
         patch.dueAt = update.dueAt;
+        if (update.dueAt === null) {
+          patch.dueTime = null;
+          patch.dueTimeZone = null;
+        }
       }
 
       if (update.dueEndAt !== undefined) {
@@ -6008,6 +6047,13 @@ export const updateNodesBatch = mutation({
         patch.priority = null;
         patch.dueAt = null;
         patch.dueEndAt = null;
+        patch.dueTime = null;
+        patch.dueTimeZone = null;
+      }
+
+      if (nextKind !== "task") {
+        patch.dueTime = null;
+        patch.dueTimeZone = null;
       }
 
       if (

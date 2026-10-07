@@ -1274,6 +1274,45 @@ test("buildTaskCalendarIcs emits all-day events with exclusive end dates", () =>
   assert.match(ics, /DESCRIPTION:Page: Home\\nTags: #perm/);
 });
 
+test("buildTaskCalendarIcs exports scheduled times in UTC across time zones and daylight saving", () => {
+  const summer = new Date("2026-08-20T12:00:00.000Z").getTime();
+  const winter = new Date("2026-12-20T12:00:00.000Z").getTime();
+
+  const ics = buildTaskCalendarIcs({
+    calendarName: "MaleshFlow Tasks",
+    events: [
+      {
+        uid: "honolulu@maleshflow.tasks",
+        summary: "Morning task",
+        dueAt: summer,
+        dueTime: "09:30",
+        dueTimeZone: "Pacific/Honolulu",
+        updatedAt: summer,
+      },
+      {
+        uid: "new-york-summer@maleshflow.tasks",
+        summary: "Summer task",
+        dueAt: summer,
+        dueTime: "09:30",
+        dueTimeZone: "America/New_York",
+        updatedAt: summer,
+      },
+      {
+        uid: "new-york-winter@maleshflow.tasks",
+        summary: "Winter task",
+        dueAt: winter,
+        dueTime: "09:30",
+        dueTimeZone: "America/New_York",
+        updatedAt: winter,
+      },
+    ],
+  });
+
+  assert.match(ics, /UID:honolulu@maleshflow.tasks[\s\S]*?DTSTART:20260820T193000Z\r\nDTEND:20260820T203000Z/);
+  assert.match(ics, /UID:new-york-summer@maleshflow.tasks[\s\S]*?DTSTART:20260820T133000Z\r\nDTEND:20260820T143000Z/);
+  assert.match(ics, /UID:new-york-winter@maleshflow.tasks[\s\S]*?DTSTART:20261220T143000Z\r\nDTEND:20261220T153000Z/);
+});
+
 test("extractLinkMatches preserves ranges for inline rendering", () => {
   const matches = extractLinkMatches(
     "See [[Launch Page]], [[Attachment note|node:node_456]], and [OpenAI](openai.com).",
