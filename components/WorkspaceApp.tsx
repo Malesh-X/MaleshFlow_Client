@@ -15746,7 +15746,7 @@ function ConfiguredWorkspace({
                     No matching actions.
                   </p>
                 ) : (
-                  <div className="grid min-h-full auto-rows-[minmax(6rem,1fr)]">
+                  <div className="flex flex-col">
                     {actionResults.map((result, index) => {
                       const isPinnedAction = pinnedActionKeys.has(result.key);
 
@@ -15756,7 +15756,7 @@ function ConfiguredWorkspace({
                           data-palette-item-index={index}
                           onMouseEnter={() => setPaletteHighlightIndex(index)}
                           className={clsx(
-                            "flex w-full items-center gap-2 transition",
+                            "flex min-h-24 w-full items-center gap-2 transition",
                             index === paletteHighlightIndex
                               ? "bg-[var(--workspace-sidebar-bg)]"
                               : "hover:bg-[var(--workspace-surface-hover)]",
@@ -15769,7 +15769,7 @@ function ConfiguredWorkspace({
                               void result.onSelect();
                             }}
                             className={clsx(
-                              "flex min-w-0 flex-1 items-center justify-between gap-3 py-3 pl-5 pr-2 text-left transition",
+                              "flex min-w-0 flex-1 self-stretch items-center justify-between gap-3 py-3 pl-5 pr-2 text-left transition",
                               result.disabled ? "cursor-wait opacity-70" : "",
                             )}
                           >
