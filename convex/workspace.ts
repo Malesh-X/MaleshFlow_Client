@@ -4526,11 +4526,12 @@ export const listWaitingTasks = query({
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const tasks = await ctx.db
       .query("nodes")
-      .withIndex("by_kind_status", (query) => query.eq("kind", "task"))
-      .collect();
+      .withSearchIndex("search_text", (query) =>
+        query.search("text", "waiting").eq("archived", false).eq("kind", "task"),
+      )
+      .take(1024);
 
     const waitingTasks = tasks
-      .filter((task) => !task.archived)
       .filter((task) => task.taskStatus !== "done" && task.taskStatus !== "cancelled")
       .filter((task) => textHasTag(task.text, "waiting"))
       .sort((left, right) => {
