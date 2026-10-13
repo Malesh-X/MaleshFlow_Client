@@ -279,12 +279,10 @@ export function advanceRecurringDueDate(args: {
   mode: RecurringCompletionMode;
   now?: Date;
 }) {
-  const dueDate = toLocalNoon(new Date(args.dueAt));
-  const today = getTodayReferenceDate(args.now);
   const baseDate =
-    args.mode === "today" && today.getTime() > dueDate.getTime()
-      ? today
-      : dueDate;
+    args.mode === "today"
+      ? getTodayReferenceDate(args.now)
+      : toLocalNoon(new Date(args.dueAt));
   const nextDate = new Date(baseDate);
 
   if (isRecurrencePreset(args.frequency)) {
