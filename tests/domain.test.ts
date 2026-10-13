@@ -2870,6 +2870,16 @@ test("recurring due dates can advance from the original due date or today", () =
 
   assert.equal(
     advanceRecurringDueDate({
+      dueAt: new Date(2026, 9, 14, 12, 0, 0, 0).getTime(),
+      frequency: "daily",
+      mode: "today",
+      now: new Date(2026, 9, 13, 13, 55, 0, 0),
+    }),
+    new Date(2026, 9, 15, 12, 0, 0, 0).getTime(),
+  );
+
+  assert.equal(
+    advanceRecurringDueDate({
       dueAt,
       frequency: {
         interval: 10,
