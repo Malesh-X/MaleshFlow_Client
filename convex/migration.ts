@@ -6,7 +6,7 @@ import { v } from "convex/values";
 import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import { buildDeterministicEmbedding } from "../lib/domain/embeddings";
 import {
   chunkMigrationDocument,
@@ -640,8 +640,8 @@ export const listDynalistSources = action({
     ownerKey: v.string(),
     apiToken: v.string(),
   },
-  handler: async (_ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const response = await fetchDynalistJson<{ files: DynalistFileEntry[] }>(
       "file/list",
       args.apiToken,
@@ -659,8 +659,8 @@ export const listWorkflowySources = action({
     ownerKey: v.string(),
     apiKey: v.string(),
   },
-  handler: async (_ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const response = await fetchWorkflowyJson<WorkflowyNodesListResponse>(
       "/api/v1/nodes?parent_id=None",
       args.apiKey,
@@ -682,7 +682,7 @@ export const startDynalistMigration = action({
     documentIds: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const documents: MigrationSourceDocumentSnapshot[] = [];
 
     for (const documentId of args.documentIds) {
@@ -706,7 +706,7 @@ export const startWorkflowyMigration = action({
     rootIds: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const documents: MigrationSourceDocumentSnapshot[] = [];
 
     for (const rootId of args.rootIds) {
@@ -730,7 +730,7 @@ export const startLogseqMigration = action({
     ),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const documents = args.files
       .filter((file) => file.path.toLowerCase().endsWith(".md"))
@@ -748,7 +748,7 @@ export const suggestMigrationChunk = action({
     guidance: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const context = (await ctx.runQuery(getMigrationChunkContextRef, {
       chunkId: args.chunkId,
     })) as
@@ -893,7 +893,7 @@ export const applyMigrationChunk = action({
     chunkId: v.id("migrationChunks"),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const context = (await ctx.runQuery(getMigrationChunkContextRef, {
       chunkId: args.chunkId,
     })) as
@@ -941,7 +941,7 @@ export const applyMigrationChunkToRemaining = action({
     chunkId: v.id("migrationChunks"),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const context = (await ctx.runQuery(getMigrationChunkContextRef, {
       chunkId: args.chunkId,
     })) as

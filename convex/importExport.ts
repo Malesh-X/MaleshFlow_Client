@@ -3,7 +3,7 @@
 import { v } from "convex/values";
 import { action } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import { parseMarkdownBundle } from "../lib/domain/markdown";
 import { internal } from "./_generated/api";
 
@@ -29,7 +29,7 @@ export const importMarkdownBundle = action({
     ),
   },
   handler: async (ctx, args): Promise<unknown> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const warnings = args.files
       .filter((file) => !file.path.toLowerCase().endsWith(".md"))
       .map((file) => `Skipped non-Markdown file: ${file.path}`);
@@ -71,7 +71,7 @@ export const exportWorkspace = action({
     ownerKey: v.string(),
   },
   handler: async (ctx, args): Promise<Array<{ path: string; content: string }>> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await ctx.runQuery(buildExportBundleRef, {});
   },
 });
@@ -94,7 +94,7 @@ export const exportDataDump = action({
       downloadUrl: string | null;
     }>;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await ctx.runQuery(buildDataDumpBundleRef, {});
   },
 });

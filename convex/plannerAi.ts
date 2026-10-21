@@ -7,7 +7,7 @@ import { z } from "zod";
 import { action } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import {
   findPlannerSectionNode,
   getPlannerDayTimestamp,
@@ -98,7 +98,7 @@ export const completePlannerDayWithAi = action({
     archivedDuplicateCount: number;
     archivedDuplicateTexts: string[];
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await ctx.runMutation(api.planner.completePlannerDay, {
       ownerKey: args.ownerKey,
       pageId: args.pageId,
@@ -124,7 +124,7 @@ export const suggestRandomPlannerTask = action({
     sourcePageId: Id<"pages"> | null;
     sourcePageTitle: string | null;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await ctx.runQuery(suggestRandomPlannerTaskCandidateRef, args);
   },
 });
@@ -145,7 +145,7 @@ export const suggestNextPlannerTask = action({
     dueEndAt: number | null;
     sectionTitle: string;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const plannerContext = (await ctx.runQuery(getPlannerPageContextRef, {
       pageId: args.pageId,
@@ -291,7 +291,7 @@ export const addRandomPlannerTaskWithAi = action({
     linkedSourceTaskId: Id<"nodes"> | null;
     created: boolean;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const inserted = (await ctx.runMutation(
       args.sourceTaskId ? api.planner.addPlannerSourceTask : api.planner.addRandomPlannerTask,

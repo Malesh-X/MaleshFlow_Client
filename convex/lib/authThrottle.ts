@@ -1,10 +1,12 @@
-import type { DatabaseReader, DatabaseWriter } from "../_generated/server";
+import { internal } from "../_generated/api";
+import type { ActionCtx, DatabaseReader, DatabaseWriter } from "../_generated/server";
 import { assertOwnerKey, isOwnerKeyConfigured, isOwnerKeyValid } from "./auth";
 
 // Lockout for failed owner-key attempts. Failures are COUNTED only by the
 // non-throwing checkOwnerKey mutation (a throwing mutation would roll back its
 // own failure write — Convex transactions are all-or-nothing), while every
-// query and mutation ENFORCES an active lock via assertOwnerKeyGuarded.
+// query and mutation ENFORCES an active lock via assertOwnerKeyGuarded, and
+// every action via assertOwnerKeyGuardedInAction.
 const AUTH_THROTTLE_KEY = "owner";
 const FREE_FAILURES = 10;
 const BASE_LOCK_MS = 60_000;
@@ -24,6 +26,16 @@ export async function isAuthLocked(db: DatabaseReader) {
 
 export async function assertOwnerKeyGuarded(db: DatabaseReader, ownerKey: string) {
   if (await isAuthLocked(db)) {
+    throw new Error("Too many failed access attempts. Try again later.");
+  }
+  assertOwnerKey(ownerKey);
+}
+
+export async function assertOwnerKeyGuardedInAction(
+  ctx: Pick<ActionCtx, "runQuery">,
+  ownerKey: string,
+): Promise<void> {
+  if (await ctx.runQuery(internal.workspace.getOwnerAccessLocked, {})) {
     throw new Error("Too many failed access attempts. Try again later.");
   }
   assertOwnerKey(ownerKey);

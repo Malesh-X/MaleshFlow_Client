@@ -5,7 +5,7 @@ import { v } from "convex/values";
 import { action, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import { buildDeterministicEmbedding } from "../lib/domain/embeddings";
 
 const LEGACY_CHUNK_TARGET_CHARS = 4000;
@@ -263,7 +263,7 @@ export const processLegacyFile = action({
     buildSemantic: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const file = (await ctx.runQuery(internal.legacy.getLegacyFileForProcessing, {
       fileId: args.fileId,
     })) as Doc<"legacyFiles"> | null;
@@ -369,7 +369,7 @@ export const buildLegacySemanticIndex = action({
     fileId: v.id("legacyFiles"),
   },
   handler: async (ctx, args) => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const file = (await ctx.runQuery(internal.legacy.getLegacyFileForProcessing, {
       fileId: args.fileId,
     })) as Doc<"legacyFiles"> | null;
@@ -443,7 +443,7 @@ export const searchLegacySemantic = action({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args): Promise<LegacySearchResult[]> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const normalizedQuery = args.query.trim();
     if (!normalizedQuery) {
       return [];

@@ -2822,6 +2822,13 @@ export const validateOwnerKey = query({
   },
 });
 
+// Actions have no db handle, so they read the lockout through this query
+// (see assertOwnerKeyGuardedInAction).
+export const getOwnerAccessLocked = internalQuery({
+  args: {},
+  handler: async (ctx) => await isAuthLocked(ctx.db),
+});
+
 // Non-throwing owner-key check used by the unlock form. This is the only
 // endpoint that COUNTS failed attempts (a throwing mutation would roll back
 // its own failure write); every other endpoint enforces the resulting lock.

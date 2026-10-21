@@ -8,7 +8,7 @@ import { z } from "zod";
 import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import {
   MAX_PLANNER_SYMBOL_COUNT,
   normalizeGeneratedPlannerSymbols,
@@ -183,7 +183,7 @@ export const generatePlannerSymbolLabels = action({
   },
   handler: async (ctx, args) => {
     try {
-      assertOwnerKey(args.ownerKey);
+      await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
       const context = (await ctx.runQuery(getPlannerSymbolGenerationContextRef, {
         plannerPageId: args.plannerPageId,
         nodeIds: args.nodeIds,

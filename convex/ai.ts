@@ -8,7 +8,7 @@ import { z } from "zod";
 import { action, internalAction } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import {
   buildDeterministicEmbedding,
   buildEmbeddingInput,
@@ -168,7 +168,7 @@ export const searchNodes = action({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args): Promise<unknown[]> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await runSemanticSearch(ctx, {
       query: args.query,
       pageId: args.pageId as string | undefined,
@@ -187,7 +187,7 @@ export const findNodesText = action({
     exact: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<unknown[]> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await ctx.runQuery(fallbackTextSearchRef, {
       query: args.query,
       pageId: args.pageId,
@@ -205,7 +205,7 @@ export const searchArchivedNodes = action({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args): Promise<unknown[]> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await runSemanticSearch(ctx, {
       query: args.query,
       limit: args.limit,
@@ -221,7 +221,7 @@ export const findArchivedNodesText = action({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args): Promise<unknown[]> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     return await ctx.runQuery(fallbackTextSearchRef, {
       query: args.query,
       limit: Math.max(1, Math.min(args.limit ?? 12, 20)),
@@ -236,7 +236,7 @@ export const parseOutlineScreenshot = action({
     imageDataUrl: v.string(),
   },
   handler: async (ctx, args): Promise<unknown> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const client = getOpenAIClient();
     if (!client) {
       throw new Error("Screenshot import requires an OpenAI API key.");
@@ -740,7 +740,7 @@ async function maybePlanAiWorkingMemoryAction(
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function answerWorkspaceQuestionInternal(ctx: any, args: WorkspaceKnowledgeArgs): Promise<WorkspaceKnowledgeAnswer> {
-  assertOwnerKey(args.ownerKey);
+  await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
   const question = args.question.trim();
   const messageOnlyQuestion = stripLinkMarkup(question);
@@ -1068,7 +1068,7 @@ export const chatWithWorkspace = action({
     linkedNodeIds: v.optional(v.array(v.id("nodes"))),
   },
   handler: async (ctx, args): Promise<WorkspaceChatResult> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const question = args.question.trim();
     if (question.length === 0) {

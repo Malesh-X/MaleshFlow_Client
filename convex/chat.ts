@@ -7,7 +7,7 @@ import { z } from "zod";
 import { action } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { assertOwnerKey } from "./lib/auth";
+import { assertOwnerKeyGuardedInAction } from "./lib/authThrottle";
 import {
   buildJournalFeedbackUserPrompt,
   buildModelRewriteUserPrompt,
@@ -226,7 +226,7 @@ export const runChatPlanner = action({
     messageId: Id<"chatMessages">;
     plan: ChatPlan;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
     const threadId: Id<"chatThreads"> =
       args.threadId ??
       (await ctx.runMutation(ensureChatThreadRef, {
@@ -344,7 +344,7 @@ export const runPlannerChat = action({
     messageId: Id<"chatMessages">;
     plan: PlannerChatPlan;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const threadId: Id<"chatThreads"> =
       args.threadId ??
@@ -508,7 +508,7 @@ export const rewriteModelSection = action({
     modelLines: string[];
     debug: ModelRewriteDebug;
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const threadId: Id<"chatThreads"> =
       args.threadId ??
@@ -667,7 +667,7 @@ export const generateJournalFeedback = action({
     summary: string;
     feedbackLines: string[];
   }> => {
-    assertOwnerKey(args.ownerKey);
+    await assertOwnerKeyGuardedInAction(ctx, args.ownerKey);
 
     const journalContext = await ctx.runQuery(getJournalPageContextRef, {
       pageId: args.pageId,
