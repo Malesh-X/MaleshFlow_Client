@@ -909,6 +909,9 @@ type FocusedOutlineContextValue = {
 };
 
 const NodeZoomContext = createContext<(nodeId: string) => void>(() => undefined);
+const NodeCopyLinkContext = createContext<(target: EventTarget | null) => Promise<void>>(
+  async () => undefined,
+);
 // True while the once-per-session tag list is still being fetched, so the #tag
 // autocomplete can show a loading row instead of "No matching tags."
 const TagAutocompleteLoadingContext = createContext(false);
@@ -1232,6 +1235,7 @@ function MobileReorderToolbar({
   onMoveDown,
   onToggleKind,
   onZoomIntoItem,
+  onCopyLink,
 }: {
   canOutdent: boolean;
   canIndent: boolean;
@@ -1244,6 +1248,7 @@ function MobileReorderToolbar({
   onMoveDown: () => void;
   onToggleKind: () => void;
   onZoomIntoItem: () => void;
+  onCopyLink: () => void;
 }) {
   const vpStyle = useVisualViewportStyle();
   const buttonClass =
@@ -1316,6 +1321,16 @@ function MobileReorderToolbar({
         className={buttonClass}
       >
         ◎
+      </button>
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onCopyLink}
+        aria-label="Copy node link"
+        title="Copy node link"
+        className={buttonClass}
+      >
+        {"\u{1F517}\u{FE0E}"}
       </button>
     </div>,
     document.body,
@@ -12740,6 +12755,7 @@ function ConfiguredWorkspace({
   return (
     <WorkspaceHistoryProvider value={history}>
       <NodeZoomContext.Provider value={handleZoomIntoNode}>
+      <NodeCopyLinkContext.Provider value={copyNodeLinkToClipboard}>
       <TagAutocompleteLoadingContext.Provider value={cachedTags === null}>
       <NodeScheduleActionContext.Provider value={nodeScheduleActionContextValue}>
       <PageSectionCollapseContext.Provider value={pageSectionCollapseContextValue}>
@@ -16210,6 +16226,7 @@ function ConfiguredWorkspace({
       </PageSectionCollapseContext.Provider>
       </NodeScheduleActionContext.Provider>
       </TagAutocompleteLoadingContext.Provider>
+      </NodeCopyLinkContext.Provider>
       </NodeZoomContext.Provider>
     </WorkspaceHistoryProvider>
   );
@@ -19343,6 +19360,7 @@ function OutlineNodeEditor({
 } & PlannerSymbolModeRenderProps) {
   const history = useWorkspaceHistory();
   const onZoomIntoNode = useContext(NodeZoomContext);
+  const onCopyNodeLink = useContext(NodeCopyLinkContext);
   const { openTaskSchedule, openNoteDate } = useContext(NodeScheduleActionContext);
   const isMobileLayout = useIsMobileLayout();
   const completePlannerTaskRaw = useMutation(api.planner.completePlannerTask);
@@ -22057,6 +22075,9 @@ function OutlineNodeEditor({
                     void handleToggleNodeKind().catch(() => undefined);
                   }}
                   onZoomIntoItem={zoomIntoCurrentNode}
+                  onCopyLink={() => {
+                    void onCopyNodeLink(textareaRef.current).catch(() => undefined);
+                  }}
                 />
               ) : null}
             </div>
