@@ -94,7 +94,7 @@ import {
   extractTagMatches,
   splitEdgeTagMatches,
   stripTagsFromText,
-  textHasTag,
+  textHasDimmedTaskTag,
 } from "@/lib/domain/tags";
 import {
   buildPageBacklinkFindQuery,
@@ -5021,6 +5021,11 @@ function ConfiguredWorkspace({
   const paletteInputRef = useRef<HTMLInputElement>(null);
   const paletteResultsRef = useRef<HTMLDivElement>(null);
   const lastPaletteModeRef = useRef<PaletteMode>("pages");
+  const paletteReturnFocusRef = useRef<{
+    nodeId: string;
+    selectionStart: number;
+    selectionEnd: number;
+  } | null>(null);
   const hasResolvedInitialPageSelection = useRef(false);
   const hasRequestedSidebarPage = useRef(false);
   const hasRequestedTaskSidebarSection = useRef(new Set<string>());
@@ -5123,6 +5128,22 @@ function ConfiguredWorkspace({
   const openPalette = useCallback((mode: PaletteMode) => {
     const selectedNodeSnapshot = [...selectedNodeIds];
     let panelNodeId: string | null = null;
+    // If a node's text is being edited, keep that node as the palette's target
+    // in every mode and remember the caret so editing resumes on close.
+    const activeElement =
+      typeof document !== "undefined" ? document.activeElement : null;
+    const editingNodeId =
+      activeElement instanceof HTMLTextAreaElement
+        ? getNodeIdFromTarget(activeElement)
+        : null;
+    paletteReturnFocusRef.current =
+      editingNodeId && activeElement instanceof HTMLTextAreaElement
+        ? {
+            nodeId: editingNodeId,
+            selectionStart: activeElement.selectionStart,
+            selectionEnd: activeElement.selectionEnd,
+          }
+        : null;
     setDirectSchedulePaletteNode(null);
     if (mode === "actions") {
       setActionContextSelectedNodeIds(selectedNodeSnapshot);
@@ -5140,6 +5161,9 @@ function ConfiguredWorkspace({
       panelNodeId =
         focusedNodeId ??
         (selectedNodeIds.size === 1 ? ([...selectedNodeIds][0] ?? null) : null);
+      setActionContextNodeId(panelNodeId);
+    } else if (editingNodeId) {
+      panelNodeId = editingNodeId;
       setActionContextNodeId(panelNodeId);
     }
     writeWorkspacePanelToHistory(
@@ -7485,6 +7509,32 @@ function ConfiguredWorkspace({
     }
 
     setActionContextNodeId(null);
+
+    // Resume editing the node that was being edited when the palette opened,
+    // unless the command that closed the palette moved focus somewhere else.
+    const returnFocus = paletteReturnFocusRef.current;
+    paletteReturnFocusRef.current = null;
+    if (!returnFocus) {
+      return;
+    }
+    window.setTimeout(() => {
+      const activeElement = document.activeElement;
+      if (activeElement && activeElement !== document.body) {
+        return;
+      }
+      const textarea = document.querySelector<HTMLTextAreaElement>(
+        `[data-node-id="${returnFocus.nodeId}"] textarea:not([disabled])`,
+      );
+      if (!textarea) {
+        return;
+      }
+      textarea.focus({ preventScroll: true });
+      const length = textarea.value.length;
+      textarea.setSelectionRange(
+        Math.min(returnFocus.selectionStart, length),
+        Math.min(returnFocus.selectionEnd, length),
+      );
+    }, 0);
   }, [paletteOpen]);
 
   useEffect(() => {
@@ -19691,14 +19741,14 @@ function OutlineNodeEditor({
     !hasPageLinkPreview &&
     !hasPlannerSymbolPreview;
   const hasDisplayPreview = hasPlannerSymbolPreview || hasPageLinkPreview || hasPlainTextPreview;
-  const isOptionalTaggedTask = node.kind === "task" && textHasTag(draft, "optional");
+  const isDimmedTaggedTask = node.kind === "task" && textHasDimmedTaskTag(draft);
   const completedTextClass = isCompleted
     ? "text-[var(--workspace-text-faint)] line-through"
     : isDimmedByCompletedAncestor
       ? "text-[var(--workspace-text-faint)]"
       : isDimmedLine
         ? "text-[var(--workspace-text-subtle)]"
-        : isOptionalTaggedTask
+        : isDimmedTaggedTask
           ? "text-[var(--workspace-text)] opacity-75"
           : "text-[var(--workspace-text)]";
   const activeLinkToken = getActiveLinkToken(draft, caretPosition);

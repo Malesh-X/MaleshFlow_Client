@@ -62,6 +62,13 @@ export function textHasTag(text: string, normalizedTag: string) {
   );
 }
 
+// Tasks tagged with any of these render slightly dimmed so they visually recede.
+export const DIMMED_TASK_TAGS = ["optional", "later"] as const;
+
+export function textHasDimmedTaskTag(text: string) {
+  return DIMMED_TASK_TAGS.some((tag) => textHasTag(text, tag));
+}
+
 export function splitEdgeTagMatches(text: string) {
   let remaining = text.trimStart();
   const leadingTags: ExtractedTagMatch[] = [];

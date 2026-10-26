@@ -37,6 +37,7 @@ import {
   extractTags,
   splitEdgeTagMatches,
   stripTagsFromText,
+  textHasDimmedTaskTag,
   textHasTag,
 } from "../lib/domain/tags";
 import { parseMarkdownFile, serializePageToMarkdown } from "../lib/domain/markdown";
@@ -1024,6 +1025,14 @@ test("textHasTag matches whole normalized tags only", () => {
   assert.equal(textHasTag("No tags here", "optional"), false);
   // Tags inside link markup do not count.
   assert.equal(textHasTag("[[#optional|page:abc123]]", "optional"), false);
+});
+
+test("textHasDimmedTaskTag dims #optional and #later tasks", () => {
+  assert.equal(textHasDimmedTaskTag("Buy beans #optional"), true);
+  assert.equal(textHasDimmedTaskTag("Call the bank #later"), true);
+  assert.equal(textHasDimmedTaskTag("#Later: tidy garage"), true);
+  assert.equal(textHasDimmedTaskTag("Handle #laterally tagged case"), false);
+  assert.equal(textHasDimmedTaskTag("Plain task #urgent"), false);
 });
 
 test("linkSearchScore ranks fuzzy link autocomplete matches by tier", () => {
