@@ -4040,6 +4040,52 @@ function readStoredBoolean(key: string, defaultValue: boolean) {
   return storedValue === "true";
 }
 
+// Mobile browsers often reopen the app in a fresh tab, which would drop
+// per-tab (sessionStorage) collapse state. On touch devices it is kept on the
+// device instead; desktop keeps it per tab. Decided once per page load so
+// resizing a desktop window never switches stores.
+let cachedIsMobileDeviceForCollapseState: boolean | null = null;
+
+function isMobileDeviceForCollapseState() {
+  if (cachedIsMobileDeviceForCollapseState === null) {
+    cachedIsMobileDeviceForCollapseState =
+      typeof window !== "undefined" &&
+      window.matchMedia("(pointer: coarse)").matches &&
+      navigator.maxTouchPoints > 0;
+  }
+
+  return cachedIsMobileDeviceForCollapseState;
+}
+
+function readCollapseStateItem(key: string) {
+  if (isMobileDeviceForCollapseState()) {
+    // Fall back to this tab's sessionStorage so existing state survives rollout.
+    return window.localStorage.getItem(key) ?? window.sessionStorage.getItem(key);
+  }
+
+  return window.sessionStorage.getItem(key);
+}
+
+function writeCollapseStateItem(key: string, value: string) {
+  const storage = isMobileDeviceForCollapseState()
+    ? window.localStorage
+    : window.sessionStorage;
+  storage.setItem(key, value);
+}
+
+function readStoredCollapseBoolean(key: string, defaultValue: boolean) {
+  if (typeof window === "undefined") {
+    return defaultValue;
+  }
+
+  const storedValue = readCollapseStateItem(key);
+  if (storedValue === null) {
+    return defaultValue;
+  }
+
+  return storedValue === "true";
+}
+
 function readStoredLocalBoolean(key: string, defaultValue: boolean) {
   if (typeof window === "undefined") {
     return defaultValue;
@@ -4098,12 +4144,12 @@ function readStoredPlannerSidebarWidth() {
     : PLANNER_RIGHT_SIDEBAR_DEFAULT_WIDTH;
 }
 
-function persistCollapsedNodeIdsToSessionStorage(nodeIds: Iterable<string>) {
+function persistCollapsedNodeIds(nodeIds: Iterable<string>) {
   if (typeof window === "undefined") {
     return;
   }
 
-  window.sessionStorage.setItem(
+  writeCollapseStateItem(
     COLLAPSED_NODES_STORAGE_KEY,
     JSON.stringify([...nodeIds]),
   );
@@ -5074,7 +5120,7 @@ function ConfiguredWorkspace({
     (updater: (current: Set<string>) => Set<string>) => {
       setCollapsedNodeIds((current) => {
         const next = updater(current);
-        persistCollapsedNodeIdsToSessionStorage(next);
+        persistCollapsedNodeIds(next);
         return next;
       });
     },
@@ -7078,31 +7124,31 @@ function ConfiguredWorkspace({
       return;
     }
 
-    setIsSidebarCollapsed(readStoredBoolean(SIDEBAR_COLLAPSE_STORAGE_KEY, true));
+    setIsSidebarCollapsed(readStoredCollapseBoolean(SIDEBAR_COLLAPSE_STORAGE_KEY, true));
     setIsFavoritesSectionCollapsed(
-      readStoredBoolean(FAVORITES_SECTION_COLLAPSE_STORAGE_KEY, false),
+      readStoredCollapseBoolean(FAVORITES_SECTION_COLLAPSE_STORAGE_KEY, false),
     );
     setIsSidebarTextSectionCollapsed(
-      readStoredBoolean(SIDEBAR_TEXT_SECTION_COLLAPSE_STORAGE_KEY, true),
+      readStoredCollapseBoolean(SIDEBAR_TEXT_SECTION_COLLAPSE_STORAGE_KEY, true),
     );
     setIsUncategorizedSectionCollapsed(
-      readStoredBoolean(UNCATEGORIZED_SECTION_COLLAPSE_STORAGE_KEY, true),
+      readStoredCollapseBoolean(UNCATEGORIZED_SECTION_COLLAPSE_STORAGE_KEY, true),
     );
     setIsAllSectionCollapsed(
-      readStoredBoolean(ALL_SECTION_COLLAPSE_STORAGE_KEY, false),
+      readStoredCollapseBoolean(ALL_SECTION_COLLAPSE_STORAGE_KEY, false),
     );
     setIsTagsSectionCollapsed(
-      readStoredBoolean(TAGS_SECTION_COLLAPSE_STORAGE_KEY, true),
+      readStoredCollapseBoolean(TAGS_SECTION_COLLAPSE_STORAGE_KEY, true),
     );
     setIsArchiveSectionCollapsed(
-      readStoredBoolean(ARCHIVE_SECTION_COLLAPSE_STORAGE_KEY, true),
+      readStoredCollapseBoolean(ARCHIVE_SECTION_COLLAPSE_STORAGE_KEY, true),
     );
     setIsLegacySectionCollapsed(
-      readStoredBoolean(LEGACY_SECTION_COLLAPSE_STORAGE_KEY, false),
+      readStoredCollapseBoolean(LEGACY_SECTION_COLLAPSE_STORAGE_KEY, false),
     );
     try {
       const storedCollapsedAllPageTypeSections = JSON.parse(
-        window.sessionStorage.getItem(ALL_PAGE_TYPE_SECTIONS_COLLAPSE_STORAGE_KEY) ?? "[]",
+        readCollapseStateItem(ALL_PAGE_TYPE_SECTIONS_COLLAPSE_STORAGE_KEY) ?? "[]",
       );
       if (Array.isArray(storedCollapsedAllPageTypeSections)) {
         setCollapsedAllPageTypeSections(
@@ -7118,7 +7164,7 @@ function ConfiguredWorkspace({
     }
     try {
       const storedCollapsedPageSectionKeys = JSON.parse(
-        window.sessionStorage.getItem(PAGE_SECTION_COLLAPSE_STORAGE_KEY) ?? "[]",
+        readCollapseStateItem(PAGE_SECTION_COLLAPSE_STORAGE_KEY) ?? "[]",
       );
       if (Array.isArray(storedCollapsedPageSectionKeys)) {
         setCollapsedPageSectionKeys(
@@ -7140,7 +7186,7 @@ function ConfiguredWorkspace({
       readStoredLocalBoolean(PLANNER_SYMBOL_MODE_STORAGE_KEY, false),
     );
     try {
-      const storedCollapsedNodeIdsRaw = window.sessionStorage.getItem(COLLAPSED_NODES_STORAGE_KEY);
+      const storedCollapsedNodeIdsRaw = readCollapseStateItem(COLLAPSED_NODES_STORAGE_KEY);
       const storedCollapsedNodeIds = JSON.parse(storedCollapsedNodeIdsRaw ?? "[]");
       hasStoredCollapsedNodeIdsRef.current =
         storedCollapsedNodeIdsRaw !== null && Array.isArray(storedCollapsedNodeIds);
@@ -7223,7 +7269,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       SIDEBAR_COLLAPSE_STORAGE_KEY,
       isSidebarCollapsed ? "true" : "false",
     );
@@ -7238,7 +7284,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       FAVORITES_SECTION_COLLAPSE_STORAGE_KEY,
       isFavoritesSectionCollapsed ? "true" : "false",
     );
@@ -7270,7 +7316,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       SIDEBAR_TEXT_SECTION_COLLAPSE_STORAGE_KEY,
       isSidebarTextSectionCollapsed ? "true" : "false",
     );
@@ -7285,7 +7331,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       UNCATEGORIZED_SECTION_COLLAPSE_STORAGE_KEY,
       isUncategorizedSectionCollapsed ? "true" : "false",
     );
@@ -7300,7 +7346,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       ALL_SECTION_COLLAPSE_STORAGE_KEY,
       isAllSectionCollapsed ? "true" : "false",
     );
@@ -7315,7 +7361,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       ALL_PAGE_TYPE_SECTIONS_COLLAPSE_STORAGE_KEY,
       JSON.stringify([...collapsedAllPageTypeSections]),
     );
@@ -7330,7 +7376,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       PAGE_SECTION_COLLAPSE_STORAGE_KEY,
       JSON.stringify([...collapsedPageSectionKeys]),
     );
@@ -7345,7 +7391,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       TAGS_SECTION_COLLAPSE_STORAGE_KEY,
       isTagsSectionCollapsed ? "true" : "false",
     );
@@ -7387,7 +7433,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       ARCHIVE_SECTION_COLLAPSE_STORAGE_KEY,
       isArchiveSectionCollapsed ? "true" : "false",
     );
@@ -7402,7 +7448,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    window.sessionStorage.setItem(
+    writeCollapseStateItem(
       LEGACY_SECTION_COLLAPSE_STORAGE_KEY,
       isLegacySectionCollapsed ? "true" : "false",
     );
@@ -7500,7 +7546,7 @@ function ConfiguredWorkspace({
       return;
     }
 
-    persistCollapsedNodeIdsToSessionStorage(collapsedNodeIds);
+    persistCollapsedNodeIds(collapsedNodeIds);
   }, [collapsedNodeIds]);
 
   useEffect(() => {
