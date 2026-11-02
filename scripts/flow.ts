@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
+import { advanceRecurringDueDateRange, parseRecurrenceFrequency } from "../lib/domain/recurrence";
 
 type Spec = { args: string[]; optional?: string[]; flags?: string[]; usage: string };
 
@@ -34,7 +35,13 @@ const COMMANDS: Record<string, Spec> = {
       "                [--time HH:MM|none] [--priority low|medium|high|none]\n" +
       "                [--recur daily|weekly|monthly|yearly|<n>d|<n>w|<n>m|<n>y|none] [--task|--note]",
   },
-  done: { args: ["nodeId"], usage: "done <nodeId>                          Mark a task done" },
+  done: {
+    args: ["nodeId"],
+    flags: ["mode"],
+    usage:
+      "done <nodeId> [--mode dueDate|today]   Complete an item the way the app's checkbox does\n" +
+      "                                         (planner -> Past Weeks, task pages -> Done, recurring rolls forward)",
+  },
   move: {
     args: ["nodeId"],
     flags: ["page", "parent", "after"],
@@ -205,7 +212,74 @@ type TreeNode = {
   kind: string;
   taskStatus: string | null;
   archived: boolean;
+  dueAt?: number | null;
+  dueEndAt?: number | null;
+  sourceMeta?: Record<string, unknown> | null;
 };
+
+type PageDoc = { _id: string; title: string; archived?: boolean; sourceMeta?: Record<string, unknown> | null };
+
+const metaOf = (value: { sourceMeta?: unknown } | null | undefined) =>
+  value && typeof value.sourceMeta === "object" && value.sourceMeta ? (value.sourceMeta as Record<string, unknown>) : {};
+
+// Mirrors isPlannerLinkedTaskCopy / isPlannerCompletionItem in components/WorkspaceApp.tsx.
+const isPlannerLinkedTaskCopy = (node: TreeNode) => {
+  const meta = metaOf(node);
+  return meta.plannerKind === "plannerLinkedTask" && typeof meta.sourceTaskNodeId === "string" && meta.sourceTaskNodeId.length > 0;
+};
+function isPlannerCompletionItem(node: TreeNode, nodeMap: Map<string, TreeNode>) {
+  if (isPlannerLinkedTaskCopy(node)) return true;
+  let parentId = node.parentNodeId;
+  while (parentId) {
+    const parent = nodeMap.get(parentId);
+    if (!parent) return false;
+    const meta = metaOf(parent);
+    if (meta.plannerKind === "plannerDay" || meta.sectionSlot === "plannerFocus" || isPlannerLinkedTaskCopy(parent)) return true;
+    parentId = parent.parentNodeId;
+  }
+  return false;
+}
+
+// Picks the same completion path as the app's task checkbox
+// (toggleSelectedNodesCompletion in components/WorkspaceApp.tsx).
+async function completeLikeApp(nodeId: string) {
+  const completionMode = (oneOf("mode", ["dueDate", "today"]) ?? "dueDate") as "dueDate" | "today";
+  const [resolved] = (await query("workspace:resolveNodeLinks", { nodeIds: [nodeId] })) as Array<{ pageId: string | null } | null>;
+  const pageId = resolved?.pageId ?? fail("Node not found.");
+  const { nodes } = await loadTree(pageId);
+  const nodeMap = new Map(nodes.map((n) => [n._id, n]));
+  const node = nodeMap.get(nodeId) ?? fail("Node not found.");
+  if (node.archived) fail("That item is archived.");
+  const pages = (await query("workspace:listPages")) as PageDoc[];
+  const page = pages.find((p) => p._id === pageId);
+  if (!page || page.archived) fail("That item is on an archived page, which the app doesn't complete.");
+  const pageMeta = metaOf(page);
+  const isSidebarPage = pageMeta.specialPage === "sidebar";
+  const isTaskPage = !isSidebarPage && pageMeta.pageType !== "planner" && (pageMeta.pageType === "task" || pageMeta.sidebarSection === "Tasks");
+
+  if (isPlannerCompletionItem(node, nodeMap)) {
+    // Planner day/focus items: completing the last open item archives the day to Past Weeks.
+    console.error(`Planner item on "${page.title}": using planner:completePlannerTask.`);
+    await mutation("planner:completePlannerTask", { plannerNodeId: nodeId, completionMode });
+    return console.log("ok");
+  }
+  if (node.kind !== "task") fail("Only tasks (or planner items) can be completed. Use update --task first.");
+  if (node.taskStatus === "done") return console.log("Already done.");
+  if (isTaskPage && pageMeta.archiveCompletedRootTasksToDone === true) {
+    console.error(`Task page "${page.title}": using workspace:completeTaskPageTask.`);
+    await mutation("workspace:completeTaskPageTask", { nodeId, completionMode });
+    return console.log("ok");
+  }
+  const frequency = parseRecurrenceFrequency(metaOf(node).recurrenceFrequency);
+  if (frequency !== null && node.dueAt) {
+    const next = advanceRecurringDueDateRange({ dueAt: node.dueAt, dueEndAt: node.dueEndAt ?? null, frequency, mode: completionMode });
+    console.error(`Recurring task: rolling forward to the next due date (mode ${completionMode}).`);
+    await mutation("workspace:updateNode", { nodeId, kind: "task", lockKind: true, taskStatus: "todo", dueAt: next.dueAt, dueEndAt: next.dueEndAt });
+    return console.log("ok");
+  }
+  await mutation("workspace:updateNode", { nodeId, kind: "task", lockKind: true, taskStatus: "done" });
+  return console.log("ok");
+}
 
 async function loadTree(pageId: string) {
   const result = (await query("workspace:getPageTree", { pageId })) as { page: { title: string }; nodes: TreeNode[] } | null;
@@ -326,8 +400,7 @@ async function main() {
       return console.log("ok");
     }
     case "done":
-      await mutation("workspace:updateNode", { nodeId: rest[0], taskStatus: "done" });
-      return console.log("ok");
+      return completeLikeApp(rest[0]);
     case "move": {
       const parentFlag = str("parent");
       const args: Record<string, unknown> = { nodeId: rest[0] };

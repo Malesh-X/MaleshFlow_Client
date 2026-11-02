@@ -67,7 +67,7 @@ Convex login. Never print, log or commit the key. The CLI replaces it with
 | &nbsp;&nbsp;`--priority low\|medium\|high\|none` | Priority. |
 | &nbsp;&nbsp;`--recur daily\|weekly\|monthly\|yearly\|<n>d\|<n>w\|<n>m\|<n>y\|none` | Recurrence, e.g. `2w` = every 2 weeks. |
 | &nbsp;&nbsp;`--task` / `--note` | Change the node kind. |
-| `done <nodeId>` | Mark a task done. |
+| `done <nodeId> [--mode dueDate\|today]` | Complete an item exactly like the app's checkbox (see below). `--mode` sets how recurring tasks roll forward (default `dueDate`, the app's default). |
 | `move <nodeId>` | Move a node and its children. |
 | &nbsp;&nbsp;`--page <pageId>` | Destination page. Appends at its root unless `--parent` is given. |
 | &nbsp;&nbsp;`--parent <nodeId>\|root` | New parent. Without `--after`, also pass `--page` (the current page is fine) so the CLI can find the end. |
@@ -77,6 +77,20 @@ Convex login. Never print, log or commit the key. The CLI replaces it with
 
 Unknown commands, unknown flags, missing arguments and bad values are rejected
 locally, before anything connects.
+
+### How `done` completes items
+
+`done` looks up the item's page and takes the same path as the app's checkbox:
+
+| Item | Convex function | Effect |
+| --- | --- | --- |
+| Planner day or focus item (or a planner copy of a task) | `planner:completePlannerTask` | Marks it done; once the day's items are all done the day moves to Past Weeks and linked source tasks are completed. |
+| Root task on a task page with "archive completed tasks to Done" on | `workspace:completeTaskPageTask` | Moves it to the Done page (recurring tasks roll forward instead). |
+| Recurring task with a due date, anywhere else | `workspace:updateNode` | Stays open and moves to its next due date. |
+| Any other task | `workspace:updateNode` | `taskStatus: "done"`. |
+
+The dry run prints which path it picked. `update --status done` still sets the
+status directly and skips all of this.
 
 ### Dates and times
 
