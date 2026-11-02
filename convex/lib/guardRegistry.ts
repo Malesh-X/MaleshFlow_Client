@@ -55,14 +55,6 @@ export const GUARDED_MUTATIONS: Record<string, GuardedEntry> = {
   "planner:completePlannerTask": { checks: "planner item status editable" },
   "planner:completePlannerSourceTask": { checks: "planner page writable, source task status editable" },
   "planner:completePlannerDay": { checks: "page writable" },
-  "chatData:applyApprovedChatPlan": {
-    checks: "per operation: create (page, parent), update (node editable, schedule), move (node, page, parent), archive, delete, merge",
-    via: ["applyOperation"],
-  },
-  "chatData:applyApprovedPlannerPlan": {
-    checks: "per operation: complete (status), delete, update (text), move (node, parent)",
-    via: ["applyPlannerOperation"],
-  },
 };
 
 export const EXEMPT_MUTATIONS: Record<string, string> = {
@@ -83,10 +75,6 @@ export const EXEMPT_MUTATIONS: Record<string, string> = {
   "workspace:cancelEmbeddingRebuild": "System maintenance: embedding job state only.",
   "workspace:checkOwnerKey": "Auth check; writes the lockout throttle only.",
   "workspace:setWorkspaceSettings": "Workspace settings (time zone, completion mode); no tree edits.",
-  "workspace:setWorkspaceAiMemory": "Workspace AI memory text; no tree edits.",
-  "workspace:setWorkspaceInbox": "Inbox box text; the Inbox is being removed (out of scope).",
-  "workspace:clearWorkspaceInbox": "Inbox box text and its history page; the Inbox is being removed (out of scope).",
-  "workspace:setWorkspaceRandomBox": "Random Box text; being removed (out of scope).",
   "workspace:replaceUnresolvedPageLinksWithTarget": "Link maintenance: rewrites link markup in text only.",
   "workspace:replaceUnresolvedPageLinksWithNode": "Link maintenance: rewrites link markup in text only.",
   "workspace:setPagePinnedInAllSidebar": "Sidebar display setting; no tree, schedule or status change.",
@@ -97,7 +85,6 @@ export const EXEMPT_MUTATIONS: Record<string, string> = {
   "workspace:undoCompletion":
     "Undo has to restore what a completion archived or changed, including archived items and locked planner days that the guards refuse to edit. Instead it runs its own checks (convex/lib/undoReceipts.ts): every touched item must be at the revision the completion left and every subtree it deletes or restores must have the same members, or it refuses and changes nothing.",
   "chatData:ensureChatThread": "Chat tables only.",
-  "chatData:ensureWorkspaceKnowledgeThread": "Chat tables only.",
   "calendar:ensureTaskCalendarFeed": "Calendar feed table only.",
   "calendar:rotateTaskCalendarFeed": "Calendar feed table only.",
   "legacy:generateLegacyUploadUrl": "File upload URL; no data writes.",

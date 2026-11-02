@@ -17,39 +17,11 @@ export const PLANNER_WEEKDAY_NAMES = [
 
 export type PlannerWeekdayName = (typeof PLANNER_WEEKDAY_NAMES)[number];
 
-export const PLANNER_CHAT_OPERATION_TYPES = [
-  "complete_planner_task",
-  "delete_planner_node",
-  "update_planner_node",
-  "move_planner_node",
-] as const;
-
-export type PlannerChatOperationType =
-  (typeof PLANNER_CHAT_OPERATION_TYPES)[number];
-
-export const plannerChatOperationSchema = z.object({
-  type: z.enum(PLANNER_CHAT_OPERATION_TYPES),
-  description: z.string(),
-  nodeId: z.string(),
-  text: z.string().nullable(),
-  parentNodeId: z.string().nullable(),
-  afterNodeId: z.string().nullable(),
-});
-
-export const plannerChatPlanSchema = z.object({
-  summary: z.string(),
-  rationale: z.string(),
-  preview: z.array(z.string()).max(12),
-  operations: z.array(plannerChatOperationSchema).max(12),
-});
-
 export const plannerDayRollforwardPlanSchema = z.object({
   rationale: z.string(),
   orderedNodeIds: z.array(z.string()).max(128),
 });
 
-export type PlannerChatOperation = z.infer<typeof plannerChatOperationSchema>;
-export type PlannerChatPlan = z.infer<typeof plannerChatPlanSchema>;
 export type PlannerDayRollforwardPlan = z.infer<typeof plannerDayRollforwardPlanSchema>;
 
 export type PlannerTaskLike = {
