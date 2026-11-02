@@ -121,12 +121,12 @@ import {
   parseFindQuerySegments,
 } from "@/lib/domain/workspaceUi";
 import {
+  clearRetiredWorkspacePanel,
   readWorkspacePanelLocation,
   writeWorkspacePanelLocation,
   type WorkspacePaletteMode,
   type WorkspacePanelLocation,
 } from "@/lib/domain/workspaceLocation";
-import { DEFAULT_AI_WORKING_MEMORY_TEXT } from "@/lib/domain/aiMemory";
 import {
   getEffectiveTaskDueDateRange,
   type PlannerCompletionReceipt,
@@ -171,7 +171,6 @@ import { LegacyPanel } from "@/components/LegacyPanel";
 import { NoteDatePanel } from "@/components/NoteDatePanel";
 import { TaskSchedulePanel } from "@/components/TaskSchedulePanel";
 import { UnresolvedLinksPanel } from "@/components/UnresolvedLinksPanel";
-import type { ChatPlan } from "@/lib/domain/chat";
 import type { ImportedOutlineNode } from "@/lib/domain/importer";
 
 const SKIP = "skip" as const;
@@ -209,12 +208,11 @@ const PLANNER_MAIN_MIN_WIDTH = 420;
 const NODE_DRAG_MIME_TYPE = "application/x-maleshflow-node";
 const OUTLINE_CLIPBOARD_MIME_TYPE = "application/x-maleshflow-outline";
 const OUTLINE_CUT_CLIPBOARD_MIME_TYPE = "application/x-maleshflow-outline-cut";
-const WORKSPACE_AI_CHAT_TEXTAREA_ID = "workspace-ai-chat-textarea";
-const WORKSPACE_AI_CHAT_OPEN_STORAGE_KEY = "maleshflow-workspace-ai-chat-open";
-const WORKSPACE_AI_CHAT_PINNED_STORAGE_KEY = "maleshflow-workspace-ai-chat-pinned";
-const WORKSPACE_INBOX_TEXTAREA_ID = "workspace-inbox-textarea";
-const WORKSPACE_RANDOM_BOX_TEXTAREA_ID = "workspace-random-box-textarea";
-const MIN_WORKSPACE_TEXT_BOX_COUNT = 2;
+// Saved preferences of the removed AI Chat panel; cleared from old browsers.
+const RETIRED_WORKSPACE_STORAGE_KEYS = [
+  "maleshflow-workspace-ai-chat-open",
+  "maleshflow-workspace-ai-chat-pinned",
+];
 const NODE_MARKER_FOCUS_HOLD_MS = 800;
 const MAX_NODE_LINK_SHOW_CHILDREN_DEPTH = 3;
 const OUTLINE_MOBILE_INDENT_STEP = 6;
@@ -238,8 +236,6 @@ const SHORTCUT_SECTIONS = [
       { keys: ["⌘", "O"], description: "Open page search" },
       { keys: ["⌘", "⇧", "O"], description: "Search notes and tasks" },
       { keys: ["⌘", "⇧", "F"], description: "Open exact text find" },
-      { keys: ["⌘", "⇧", "L"], description: "Toggle AI chat" },
-      { keys: ["⌘", "⇧", "R"], description: "Open the random box" },
       { keys: ["Esc"], description: "Close overlays or clear selection" },
     ],
   },
@@ -307,45 +303,6 @@ const SHORTCUT_SECTIONS = [
     ],
   },
 ] as const;
-
-function normalizeWorkspaceTextBoxes(
-  texts: string[] | null | undefined,
-  legacyText?: string | null,
-) {
-  const nextTexts = Array.isArray(texts)
-    ? texts.filter((value): value is string => typeof value === "string")
-    : [];
-  if (nextTexts.length === 0 && typeof legacyText === "string") {
-    nextTexts.push(legacyText);
-  }
-  while (nextTexts.length < MIN_WORKSPACE_TEXT_BOX_COUNT) {
-    nextTexts.push("");
-  }
-  return nextTexts;
-}
-
-function updateWorkspaceTextBoxValue(texts: string[], index: number, value: string) {
-  const nextTexts = [...texts];
-  while (nextTexts.length <= index) {
-    nextTexts.push("");
-  }
-  nextTexts[index] = value;
-  while (nextTexts.length < MIN_WORKSPACE_TEXT_BOX_COUNT) {
-    nextTexts.push("");
-  }
-  return nextTexts;
-}
-
-function clampWorkspaceTextBoxIndex(index: number, texts: string[]) {
-  return Math.max(0, Math.min(index, Math.max(0, texts.length - 1)));
-}
-
-function areWorkspaceTextBoxesEqual(left: string[], right: string[]) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
 
 type PageDoc = Doc<"pages">;
 type PageTreeResult = {
@@ -638,22 +595,6 @@ type PlannerSymbolLabelState = {
   generationFailure: PlannerSymbolGenerationFailure | null;
   retryGeneration: () => void;
 };
-type WorkspaceKnowledgeSourceSnapshot = {
-  nodeId: string;
-  pageId: string | null;
-  nodeText: string;
-  pageTitle: string | null;
-  nodeKind: string;
-  content: string | null;
-};
-type WorkspaceKnowledgeMessageMetadata = {
-  kind: "knowledge_response";
-  model: string;
-  error: string | null;
-  request: string | null;
-  sources: WorkspaceKnowledgeSourceSnapshot[];
-};
-type WorkspaceActionPlanPreview = Pick<ChatPlan, "summary" | "rationale" | "preview" | "operations">;
 type SidebarTagResult = {
   label: string;
   value: string;
@@ -2158,6 +2099,25 @@ function readWorkspacePanelFromLocation() {
   return readWorkspacePanelLocation(new URL(window.location.href).searchParams);
 }
 
+// Old bookmarks and history entries can point at a removed panel; drop it from
+// the URL in place so the underlying page or focused item shows instead.
+function clearRetiredWorkspacePanelFromHistory() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  if (!clearRetiredWorkspacePanel(url.searchParams)) {
+    return;
+  }
+
+  window.history.replaceState(
+    window.history.state,
+    document.title,
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+}
+
 function writeWorkspacePanelToHistory(
   location: WorkspacePanelLocation | null,
   mode: "push" | "replace" = "replace",
@@ -2173,30 +2133,13 @@ function writeWorkspacePanelToHistory(
   if (nextUrl === currentUrl) {
     return;
   }
-  const nextTitle = location
-    ? location.kind === "aiChat"
-      ? "AI Chat"
-      : getPaletteDocumentTitle(location.mode)
-    : document.title;
+  const nextTitle = location ? getPaletteDocumentTitle(location.mode) : document.title;
   if (mode === "push") {
     window.history.pushState(window.history.state, nextTitle, nextUrl);
     return;
   }
 
   window.history.replaceState(window.history.state, nextTitle, nextUrl);
-}
-
-function focusWorkspaceAiChatInput() {
-  if (typeof document === "undefined") {
-    return;
-  }
-
-  const input = document.getElementById(WORKSPACE_AI_CHAT_TEXTAREA_ID);
-  if (input instanceof HTMLTextAreaElement) {
-    input.focus();
-    const end = input.value.length;
-    input.setSelectionRange(end, end);
-  }
 }
 
 function writePageIdToHistory(
@@ -2321,201 +2264,6 @@ function getNodeIdFromTarget(target: EventTarget | null) {
   }
 
   return target.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId ?? null;
-}
-
-function resolveExplicitKnowledgeLinkTargets(
-  value: string,
-  pagesByTitle: Map<string, PageDoc>,
-  pagesById: Map<string, PageDoc>,
-) {
-  const linkedPageIds = new Set<Id<"pages">>();
-  const linkedNodeIds = new Set<Id<"nodes">>();
-
-  for (const match of extractLinkMatches(value)) {
-    if (match.link.kind === "page") {
-      const page =
-        (match.link.targetPageRef
-          ? pagesById.get(match.link.targetPageRef)
-          : null) ??
-        (match.link.targetPageTitle
-          ? pagesByTitle.get(normalizePageTitleKey(match.link.targetPageTitle))
-          : null);
-      if (page && !page.archived) {
-        linkedPageIds.add(page._id);
-      }
-      continue;
-    }
-
-    if (match.link.kind === "node") {
-      linkedNodeIds.add(match.link.targetNodeRef as Id<"nodes">);
-    }
-  }
-
-  return {
-    linkedPageIds: [...linkedPageIds],
-    linkedNodeIds: [...linkedNodeIds],
-  };
-}
-
-function readWorkspaceKnowledgeMessageMetadata(
-  message: Doc<"chatMessages">,
-): WorkspaceKnowledgeMessageMetadata | null {
-  const metadata = message.metadata;
-  if (!metadata || typeof metadata !== "object") {
-    return null;
-  }
-
-  const record = metadata as Record<string, unknown>;
-  if (record.kind !== "knowledge_response") {
-    return null;
-  }
-
-  const rawSources = Array.isArray(record.sources) ? record.sources : [];
-  const sources = rawSources
-    .map((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return null;
-      }
-
-      const sourceRecord = entry as Record<string, unknown>;
-      if (typeof sourceRecord.nodeId !== "string") {
-        return null;
-      }
-
-      return {
-        nodeId: sourceRecord.nodeId,
-        pageId: typeof sourceRecord.pageId === "string" ? sourceRecord.pageId : null,
-        nodeText: typeof sourceRecord.nodeText === "string" ? sourceRecord.nodeText : "",
-        pageTitle:
-          typeof sourceRecord.pageTitle === "string" ? sourceRecord.pageTitle : null,
-        nodeKind:
-          typeof sourceRecord.nodeKind === "string" ? sourceRecord.nodeKind : "note",
-        content: typeof sourceRecord.content === "string" ? sourceRecord.content : null,
-      } satisfies WorkspaceKnowledgeSourceSnapshot;
-    })
-    .filter(
-      (entry): entry is WorkspaceKnowledgeSourceSnapshot => entry !== null,
-    );
-
-  return {
-    kind: "knowledge_response",
-    model: typeof record.model === "string" ? record.model : "gpt-5-mini",
-    error: typeof record.error === "string" ? record.error : null,
-    request: typeof record.request === "string" ? record.request : null,
-    sources,
-  };
-}
-
-function readWorkspaceActionPlan(
-  message: Doc<"chatMessages">,
-): WorkspaceActionPlanPreview | null {
-  const proposedPlan = message.proposedPlan;
-  if (!proposedPlan || typeof proposedPlan !== "object") {
-    return null;
-  }
-
-  const record = proposedPlan as Record<string, unknown>;
-  const rawPreview = Array.isArray(record.preview) ? record.preview : [];
-  const rawOperations = Array.isArray(record.operations) ? record.operations : [];
-  const operations: ChatPlan["operations"] = [];
-
-  for (const operation of rawOperations) {
-    if (!operation || typeof operation !== "object") {
-      continue;
-    }
-
-    const operationRecord = operation as Record<string, unknown>;
-    const operationType = typeof operationRecord.type === "string" ? operationRecord.type : "";
-    if (
-      ![
-        "create_page",
-        "rename_page",
-        "create_node",
-        "update_node",
-        "move_node",
-        "archive_node",
-        "delete_node",
-        "merge_node",
-        "set_ai_working_memory",
-      ].includes(operationType)
-    ) {
-      continue;
-    }
-
-    operations.push({
-      type: operationType as ChatPlan["operations"][number]["type"],
-      description:
-        typeof operationRecord.description === "string"
-          ? operationRecord.description
-          : "",
-      clientId:
-        typeof operationRecord.clientId === "string" ? operationRecord.clientId : null,
-      pageId:
-        typeof operationRecord.pageId === "string" ? operationRecord.pageId : null,
-      nodeId: typeof operationRecord.nodeId === "string" ? operationRecord.nodeId : null,
-      parentNodeId:
-        typeof operationRecord.parentNodeId === "string"
-          ? operationRecord.parentNodeId
-          : null,
-      parentClientId:
-        typeof operationRecord.parentClientId === "string"
-          ? operationRecord.parentClientId
-          : null,
-      afterNodeId:
-        typeof operationRecord.afterNodeId === "string" ? operationRecord.afterNodeId : null,
-      afterClientId:
-        typeof operationRecord.afterClientId === "string"
-          ? operationRecord.afterClientId
-          : null,
-      sourceNodeId: null,
-      targetNodeId: null,
-      title: null,
-      text: typeof operationRecord.text === "string" ? operationRecord.text : null,
-      kind:
-        operationRecord.kind === "task" || operationRecord.kind === "note"
-          ? operationRecord.kind
-          : null,
-      taskStatus:
-        typeof operationRecord.taskStatus === "string"
-          ? (operationRecord.taskStatus as ChatPlan["operations"][number]["taskStatus"])
-          : null,
-      noteCompleted:
-        typeof operationRecord.noteCompleted === "boolean"
-          ? operationRecord.noteCompleted
-          : null,
-      priority:
-        operationRecord.priority === "low" ||
-        operationRecord.priority === "medium" ||
-        operationRecord.priority === "high"
-          ? operationRecord.priority
-          : null,
-      dueAt: typeof operationRecord.dueAt === "number" ? operationRecord.dueAt : null,
-      archived: typeof operationRecord.archived === "boolean" ? operationRecord.archived : null,
-    });
-  }
-
-  if (operations.length === 0 && rawPreview.length === 0) {
-    return null;
-  }
-
-  return {
-    summary: typeof record.summary === "string" ? record.summary : "Proposed changes",
-    rationale: typeof record.rationale === "string" ? record.rationale : "",
-    preview: rawPreview
-      .map((entry) => (typeof entry === "string" ? entry : null))
-      .filter((entry): entry is string => entry !== null),
-    operations,
-  };
-}
-
-function readAiRequestPreview(message: Doc<"chatMessages">) {
-  const metadata = message.metadata;
-  if (!metadata || typeof metadata !== "object") {
-    return null;
-  }
-
-  const record = metadata as Record<string, unknown>;
-  return typeof record.request === "string" ? record.request : null;
 }
 
 function buildLinkSuggestions(
@@ -3586,78 +3334,6 @@ function splitPastedLines(text: string) {
     .filter((line) => line.trim().length > 0);
 }
 
-function normalizePlainTextBlockEditorValue(text: string) {
-  return text.replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ");
-}
-
-function readPlainTextBlockEditorValue(element: HTMLElement) {
-  return normalizePlainTextBlockEditorValue(element.innerText);
-}
-
-function writePlainTextBlockEditorValue(element: HTMLElement, value: string) {
-  const normalizedValue = normalizePlainTextBlockEditorValue(value);
-  if (normalizedValue.length === 0) {
-    element.replaceChildren();
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  for (const line of normalizedValue.split("\n")) {
-    const lineElement = document.createElement("div");
-    if (line.length === 0) {
-      lineElement.appendChild(document.createElement("br"));
-    } else {
-      lineElement.textContent = line;
-    }
-    fragment.appendChild(lineElement);
-  }
-  element.replaceChildren(fragment);
-}
-
-function insertPlainTextIntoContentEditable(text: string) {
-  if (typeof document === "undefined") {
-    return false;
-  }
-
-  if (document.queryCommandSupported?.("insertText")) {
-    try {
-      if (document.execCommand("insertText", false, text)) {
-        return true;
-      }
-    } catch {
-      // Fall back to manual range insertion below.
-    }
-  }
-
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) {
-    return false;
-  }
-
-  const range = selection.getRangeAt(0);
-  range.deleteContents();
-  const fragment = document.createDocumentFragment();
-  const normalizedText = normalizePlainTextBlockEditorValue(text);
-  const parts = normalizedText.split("\n");
-  parts.forEach((part, index) => {
-    if (index > 0) {
-      fragment.appendChild(document.createElement("br"));
-    }
-    if (part.length > 0) {
-      fragment.appendChild(document.createTextNode(part));
-    }
-  });
-  const lastNode = fragment.lastChild;
-  range.insertNode(fragment);
-  if (lastNode) {
-    range.setStartAfter(lastNode);
-    range.collapse(true);
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-  return true;
-}
-
 function getPreferredClipboardText(clipboardData: DataTransfer) {
   const html = clipboardData.getData("text/html");
   if (html.trim().length > 0 && /<a[\s>]/i.test(html)) {
@@ -3780,19 +3456,6 @@ function applyInlineFormattingToPreviewSegments(segments: LinkPreviewSegment[]) 
   }
 
   return rendered;
-}
-
-function readStoredBoolean(key: string, defaultValue: boolean) {
-  if (typeof window === "undefined") {
-    return defaultValue;
-  }
-
-  const storedValue = window.sessionStorage.getItem(key);
-  if (storedValue === null) {
-    return defaultValue;
-  }
-
-  return storedValue === "true";
 }
 
 // Mobile browsers often reopen the app in a fresh tab, which would drop
@@ -4146,29 +3809,6 @@ function ConfiguredWorkspace({
   const [isPlannerSymbolModeEnabled, setIsPlannerSymbolModeEnabled] = useState(() =>
     readStoredLocalBoolean(PLANNER_SYMBOL_MODE_STORAGE_KEY, false),
   );
-  const [isWorkspaceChatOpen, setIsWorkspaceChatOpen] = useState(() =>
-    readStoredBoolean(WORKSPACE_AI_CHAT_OPEN_STORAGE_KEY, false),
-  );
-  const [isWorkspaceChatPinned, setIsWorkspaceChatPinned] = useState(() =>
-    readStoredBoolean(WORKSPACE_AI_CHAT_PINNED_STORAGE_KEY, false),
-  );
-  const [isInboxOpen, setIsInboxOpen] = useState(false);
-  const [savedInboxDrafts, setSavedInboxDrafts] = useState<string[]>(["", ""]);
-  const [inboxDrafts, setInboxDrafts] = useState<string[]>(["", ""]);
-  const [activeInboxBoxIndex, setActiveInboxBoxIndex] = useState(0);
-  const [isInboxDirty, setIsInboxDirty] = useState(false);
-  const [isInboxSaving, setIsInboxSaving] = useState(false);
-  const [isInboxClearing, setIsInboxClearing] = useState(false);
-  const [inboxSaveError, setInboxSaveError] = useState("");
-  const [isRandomBoxOpen, setIsRandomBoxOpen] = useState(false);
-  const [savedRandomBoxDrafts, setSavedRandomBoxDrafts] = useState<string[]>(["", ""]);
-  const [randomBoxDrafts, setRandomBoxDrafts] = useState<string[]>(["", ""]);
-  const [activeRandomBoxIndex, setActiveRandomBoxIndex] = useState(0);
-  const [randomBoxSelectedItem, setRandomBoxSelectedItem] = useState("");
-  const [isRandomBoxListCollapsed, setIsRandomBoxListCollapsed] = useState(false);
-  const [isRandomBoxDirty, setIsRandomBoxDirty] = useState(false);
-  const [isRandomBoxSaving, setIsRandomBoxSaving] = useState(false);
-  const [randomBoxSaveError, setRandomBoxSaveError] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteMode, setPaletteMode] = useState<PaletteMode>("pages");
   const [hasHydratedPanelLocation, setHasHydratedPanelLocation] = useState(false);
@@ -4184,21 +3824,6 @@ function ConfiguredWorkspace({
   const [nodeSearchResults, setNodeSearchResults] = useState<NodeSearchResult[]>([]);
   const [isTextSearchLoading, setIsTextSearchLoading] = useState(false);
   const [isNodeSearchLoading, setIsNodeSearchLoading] = useState(false);
-  const [workspaceChatDraft, setWorkspaceChatDraft] = useState("");
-  const [workspaceChatError, setWorkspaceChatError] = useState("");
-  const [isWorkspaceChatLoading, setIsWorkspaceChatLoading] = useState(false);
-  const [applyingWorkspaceChatPlanMessageIds, setApplyingWorkspaceChatPlanMessageIds] = useState<
-    Set<string>
-  >(new Set());
-  const [workspaceAiMemoryDraft, setWorkspaceAiMemoryDraft] = useState(
-    DEFAULT_AI_WORKING_MEMORY_TEXT,
-  );
-  const [savedWorkspaceAiMemoryDraft, setSavedWorkspaceAiMemoryDraft] = useState(
-    DEFAULT_AI_WORKING_MEMORY_TEXT,
-  );
-  const [isWorkspaceAiMemoryDirty, setIsWorkspaceAiMemoryDirty] = useState(false);
-  const [isWorkspaceAiMemorySaving, setIsWorkspaceAiMemorySaving] = useState(false);
-  const [workspaceAiMemorySaveError, setWorkspaceAiMemorySaveError] = useState("");
   const [plannerRandomTaskExcludedSourceIds, setPlannerRandomTaskExcludedSourceIds] = useState<
     string[]
   >([]);
@@ -4269,11 +3894,6 @@ function ConfiguredWorkspace({
   const hasStoredCollapsedNodeIdsRef = useRef(false);
   const hasMigratedPinnedAllPagesRef = useRef(false);
   const lastLoadedModelPromptPageIdRef = useRef<string | null>(null);
-  const inboxDraftsRef = useRef<string[]>(["", ""]);
-  const activeInboxBoxIndexRef = useRef(0);
-  const randomBoxDraftsRef = useRef<string[]>(["", ""]);
-  const activeRandomBoxIndexRef = useRef(0);
-  const workspaceAiMemoryDraftRef = useRef(DEFAULT_AI_WORKING_MEMORY_TEXT);
   const pendingCutClipboardRef = useRef<{
     nodeIds: Id<"nodes">[];
     payloadNodeIds: string[];
@@ -4317,22 +3937,6 @@ function ConfiguredWorkspace({
       (embeddingRebuildProgress?.error ?? 0) > 0
       ? { ownerKey, limit: 6 }
       : SKIP,
-  );
-  const workspaceKnowledgeThread = useQuery(
-    api.chatData.getWorkspaceKnowledgeThread,
-    ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
-  );
-  const workspaceAiMemory = useQuery(
-    api.workspace.getWorkspaceAiMemory,
-    ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
-  );
-  const workspaceInbox = useQuery(
-    api.workspace.getWorkspaceInbox,
-    ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
-  );
-  const workspaceRandomBox = useQuery(
-    api.workspace.getWorkspaceRandomBox,
-    ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
   );
   const pageTree = useQuery(
     api.workspace.getPageTree,
@@ -4489,10 +4093,6 @@ function ConfiguredWorkspace({
   const setNodeCompletionRaw = useMutation(api.workspace.setNodeCompletion);
   const forceArchiveTaskPageItemRaw = useMutation(api.workspace.forceArchiveTaskPageItem);
   const setModelPageCustomPrompt = useMutation(api.workspace.setModelPageCustomPrompt);
-  const setWorkspaceInbox = useMutation(api.workspace.setWorkspaceInbox);
-  const clearWorkspaceInbox = useMutation(api.workspace.clearWorkspaceInbox);
-  const setWorkspaceRandomBox = useMutation(api.workspace.setWorkspaceRandomBox);
-  const setWorkspaceAiMemory = useMutation(api.workspace.setWorkspaceAiMemory);
   const setWorkspaceSettings = useMutation(api.workspace.setWorkspaceSettings);
   const workspaceSettings = useQuery(
     api.workspace.getWorkspaceSettings,
@@ -4915,8 +4515,6 @@ function ConfiguredWorkspace({
   );
   const findNodesText = useAction(api.ai.findNodesText);
   const searchNodes = useAction(api.ai.searchNodes);
-  const chatWithWorkspace = useAction(api.ai.chatWithWorkspace);
-  const applyApprovedChatPlanRaw = useMutation(api.chatData.applyApprovedChatPlan);
   const exportDataDump = useAction(api.importExport.exportDataDump);
   const pageTitleInputRef = useRef<HTMLInputElement>(null);
   const pageTitleDraftRef = useRef(pageTitleDraft);
@@ -5162,19 +4760,6 @@ function ConfiguredWorkspace({
       return next;
     });
   }, []);
-
-  const toggleWorkspaceChat = useCallback(() => {
-    setWorkspaceChatError("");
-    setPaletteOpen(false);
-    setPaletteQuery("");
-    setPaletteMode("pages");
-    setTextSearchResults([]);
-    setNodeSearchResults([]);
-    if (!isWorkspaceChatOpen) {
-      writeWorkspacePanelToHistory({ kind: "aiChat" }, "push");
-    }
-    setIsWorkspaceChatOpen((current) => !current);
-  }, [isWorkspaceChatOpen]);
 
   const isSidebarQueryLoading =
     Boolean(ownerKey) && isOwnerKeyValid === true && typeof sidebarTree === "undefined";
@@ -6855,7 +6440,6 @@ function ConfiguredWorkspace({
       ).some((value) => value.toLowerCase().includes(normalizedQuery)),
     );
   }, [dataDumpExclusionsQueryResult, pagesById, pagesByTitle, paletteQuery]);
-  const workspaceChatMessages = workspaceKnowledgeThread?.messages ?? [];
   const embeddingProgressLabel = useMemo(() => {
     if (!embeddingRebuildProgress) {
       return shouldTrackEmbeddingRebuild ? "Embedding status unavailable." : "";
@@ -7505,17 +7089,8 @@ function ConfiguredWorkspace({
       panelLocation: WorkspacePanelLocation | null,
       closeWhenMissing: boolean,
     ) => {
-      if (panelLocation?.kind === "aiChat") {
-        setPaletteOpen(false);
-        setPaletteQuery("");
-        setPaletteMode("pages");
-        setIsWorkspaceChatOpen(true);
-        return;
-      }
-
       if (panelLocation?.kind === "palette") {
         lastPaletteModeRef.current = panelLocation.mode;
-        setIsWorkspaceChatOpen(false);
         setDirectSchedulePaletteNode(null);
         setActionContextSelectedNodeIds([]);
         setActionContextNodeId(panelLocation.nodeId);
@@ -7529,7 +7104,6 @@ function ConfiguredWorkspace({
       }
 
       if (closeWhenMissing) {
-        setIsWorkspaceChatOpen(false);
         setPaletteOpen(false);
         setPaletteQuery("");
         setPaletteMode("pages");
@@ -7538,12 +7112,22 @@ function ConfiguredWorkspace({
       }
     };
 
+    clearRetiredWorkspacePanelFromHistory();
+    try {
+      for (const key of RETIRED_WORKSPACE_STORAGE_KEYS) {
+        window.sessionStorage.removeItem(key);
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Storage can be unavailable (private mode); nothing to clear then.
+    }
     setLocationPageId(readPageIdFromLocation());
     setLocationFocusedNodeId(readFocusedNodeIdFromLocation());
     applyPanelLocation(readWorkspacePanelFromLocation(), false);
     setHasHydratedPanelLocation(true);
 
     const handlePopState = () => {
+      clearRetiredWorkspacePanelFromHistory();
       setLocationPageId(readPageIdFromLocation());
       setLocationFocusedNodeId(readFocusedNodeIdFromLocation());
       applyPanelLocation(readWorkspacePanelFromLocation(), true);
@@ -7971,9 +7555,7 @@ function ConfiguredWorkspace({
     const nextDocumentTitle = getDocumentTitle(
       paletteOpen
         ? getPaletteDocumentTitle(paletteMode)
-        : isWorkspaceChatOpen
-          ? "AI Chat"
-          : focusedNodeLabel || nextPageTitle,
+        : focusedNodeLabel || nextPageTitle,
     );
 
     if (document.title !== nextDocumentTitle) {
@@ -7984,7 +7566,6 @@ function ConfiguredWorkspace({
     window.history.replaceState(window.history.state, nextDocumentTitle, currentUrl);
   }, [
     focusedNodeLabel,
-    isWorkspaceChatOpen,
     pagesById,
     paletteMode,
     paletteOpen,
@@ -8003,14 +7584,11 @@ function ConfiguredWorkspace({
           mode: paletteMode,
           nodeId: actionContextNodeId,
         }
-      : isWorkspaceChatOpen
-        ? { kind: "aiChat" }
-        : null;
+      : null;
     writeWorkspacePanelToHistory(panelLocation, "replace");
   }, [
     actionContextNodeId,
     hasHydratedPanelLocation,
-    isWorkspaceChatOpen,
     paletteMode,
     paletteOpen,
   ]);
@@ -8362,7 +7940,6 @@ function ConfiguredWorkspace({
     window.sessionStorage.removeItem(ARCHIVE_SECTION_COLLAPSE_STORAGE_KEY);
     window.sessionStorage.removeItem(LEGACY_SECTION_COLLAPSE_STORAGE_KEY);
     window.sessionStorage.removeItem(COLLAPSED_NODES_STORAGE_KEY);
-    window.sessionStorage.removeItem(WORKSPACE_AI_CHAT_OPEN_STORAGE_KEY);
     window.localStorage.removeItem(SIDEBAR_COLLAPSE_STORAGE_KEY);
     window.localStorage.removeItem(FAVORITES_SECTION_COLLAPSE_STORAGE_KEY);
     window.localStorage.removeItem(SIDEBAR_TEXT_SECTION_COLLAPSE_STORAGE_KEY);
@@ -8698,7 +8275,6 @@ function ConfiguredWorkspace({
   ]);
 
   const handleSelectNoPage = useCallback(() => {
-    setIsWorkspaceChatOpen(false);
     setPendingPalettePageAction(null);
     setActionContextNodeId(null);
     setActionContextSelectedNodeIds([]);
@@ -8769,7 +8345,7 @@ function ConfiguredWorkspace({
         subtitle: "Clear the current page and show the blank workspace state.",
         keywords: ["select", "no page", "blank", "clear", "home", "new tab", "page"],
         actionLabel: "Select",
-        disabled: selectedPageId === null && focusedNodeId === null && !isWorkspaceChatOpen,
+        disabled: selectedPageId === null && focusedNodeId === null,
         onSelect: handleSelectNoPage,
       },
       {
@@ -9367,7 +8943,6 @@ function ConfiguredWorkspace({
     isPreparingTaskCalendarFeed,
     isRebuildingEmbeddings,
     isSelectedPageExcludedFromDataDump,
-    isWorkspaceChatOpen,
     noteDateSummary,
     noteDateTargetNode,
     numberChildrenContextNode,
@@ -9455,423 +9030,6 @@ function ConfiguredWorkspace({
 
     return () => window.clearTimeout(timeoutId);
   }, [dataDumpExportProgress]);
-
-  useEffect(() => {
-    inboxDraftsRef.current = inboxDrafts;
-  }, [inboxDrafts]);
-
-  useEffect(() => {
-    activeInboxBoxIndexRef.current = activeInboxBoxIndex;
-  }, [activeInboxBoxIndex]);
-
-  useEffect(() => {
-    randomBoxDraftsRef.current = randomBoxDrafts;
-  }, [randomBoxDrafts]);
-
-  useEffect(() => {
-    workspaceAiMemoryDraftRef.current = workspaceAiMemoryDraft;
-  }, [workspaceAiMemoryDraft]);
-
-  useEffect(() => {
-    activeRandomBoxIndexRef.current = activeRandomBoxIndex;
-  }, [activeRandomBoxIndex]);
-
-  const normalizedWorkspaceInboxTexts = useMemo(
-    () => normalizeWorkspaceTextBoxes(workspaceInbox?.texts, workspaceInbox?.text),
-    [workspaceInbox],
-  );
-  const normalizedWorkspaceRandomBoxTexts = useMemo(
-    () => normalizeWorkspaceTextBoxes(workspaceRandomBox?.texts, workspaceRandomBox?.text),
-    [workspaceRandomBox],
-  );
-
-  useEffect(() => {
-    setSavedInboxDrafts((current) =>
-      areWorkspaceTextBoxesEqual(current, normalizedWorkspaceInboxTexts)
-        ? current
-        : normalizedWorkspaceInboxTexts,
-    );
-  }, [workspaceInbox?.updatedAt, normalizedWorkspaceInboxTexts]);
-
-  useEffect(() => {
-    setSavedRandomBoxDrafts((current) =>
-      areWorkspaceTextBoxesEqual(current, normalizedWorkspaceRandomBoxTexts)
-        ? current
-        : normalizedWorkspaceRandomBoxTexts,
-    );
-  }, [workspaceRandomBox?.updatedAt, normalizedWorkspaceRandomBoxTexts]);
-
-  const normalizedWorkspaceAiMemoryText = workspaceAiMemory?.text ?? DEFAULT_AI_WORKING_MEMORY_TEXT;
-
-  useEffect(() => {
-    setSavedWorkspaceAiMemoryDraft((current) =>
-      current === normalizedWorkspaceAiMemoryText ? current : normalizedWorkspaceAiMemoryText,
-    );
-  }, [workspaceAiMemory?.updatedAt, normalizedWorkspaceAiMemoryText]);
-
-  useEffect(() => {
-    const nextDirty = !areWorkspaceTextBoxesEqual(
-      inboxDrafts,
-      savedInboxDrafts,
-    );
-    setIsInboxDirty((current) => (current === nextDirty ? current : nextDirty));
-  }, [inboxDrafts, savedInboxDrafts]);
-
-  useEffect(() => {
-    const nextDirty = !areWorkspaceTextBoxesEqual(
-      randomBoxDrafts,
-      savedRandomBoxDrafts,
-    );
-    setIsRandomBoxDirty((current) => (current === nextDirty ? current : nextDirty));
-  }, [randomBoxDrafts, savedRandomBoxDrafts]);
-
-  useEffect(() => {
-    const nextDirty = workspaceAiMemoryDraft !== savedWorkspaceAiMemoryDraft;
-    setIsWorkspaceAiMemoryDirty((current) => (current === nextDirty ? current : nextDirty));
-  }, [savedWorkspaceAiMemoryDraft, workspaceAiMemoryDraft]);
-
-  useEffect(() => {
-    if (isWorkspaceAiMemoryDirty) {
-      return;
-    }
-
-    setWorkspaceAiMemoryDraft((current) =>
-      current === savedWorkspaceAiMemoryDraft ? current : savedWorkspaceAiMemoryDraft,
-    );
-    workspaceAiMemoryDraftRef.current = savedWorkspaceAiMemoryDraft;
-  }, [isWorkspaceAiMemoryDirty, savedWorkspaceAiMemoryDraft]);
-
-  useEffect(() => {
-    if (!isInboxOpen || !isInboxDirty) {
-      setInboxDrafts((current) =>
-        areWorkspaceTextBoxesEqual(current, savedInboxDrafts)
-          ? current
-          : savedInboxDrafts,
-      );
-      setActiveInboxBoxIndex((current) =>
-        clampWorkspaceTextBoxIndex(current, savedInboxDrafts),
-      );
-    }
-  }, [isInboxDirty, isInboxOpen, savedInboxDrafts]);
-
-  const saveInboxDraft = useCallback(
-    async (texts: string[]) => {
-      if (!ownerKey || !isOwnerKeyValid) {
-        return;
-      }
-
-      const normalizedTexts = normalizeWorkspaceTextBoxes(texts);
-      setIsInboxSaving(true);
-      setInboxSaveError("");
-      try {
-        await setWorkspaceInbox({
-          ownerKey,
-          texts: normalizedTexts,
-        });
-        setSavedInboxDrafts(normalizedTexts);
-        if (areWorkspaceTextBoxesEqual(inboxDraftsRef.current, normalizedTexts)) {
-          setIsInboxDirty(false);
-        }
-      } catch (error) {
-        setInboxSaveError(
-          error instanceof Error ? error.message : "Could not save inbox.",
-        );
-      } finally {
-        setIsInboxSaving(false);
-      }
-    },
-    [isOwnerKeyValid, ownerKey, setWorkspaceInbox],
-  );
-
-  const openInbox = useCallback(() => {
-    setInboxSaveError("");
-    setInboxDrafts(savedInboxDrafts);
-    setActiveInboxBoxIndex((current) =>
-      clampWorkspaceTextBoxIndex(current, savedInboxDrafts),
-    );
-    setIsInboxDirty(false);
-    setIsInboxOpen(true);
-  }, [savedInboxDrafts]);
-
-  const closeInbox = useCallback(() => {
-    if (isInboxClearing) {
-      return;
-    }
-    if (isInboxDirty) {
-      void saveInboxDraft(inboxDraftsRef.current);
-    }
-    setIsInboxOpen(false);
-  }, [isInboxClearing, isInboxDirty, saveInboxDraft]);
-
-  const updateInboxDraftAtIndex = useCallback((index: number, value: string) => {
-    setInboxDrafts((current) => {
-      const nextTexts = updateWorkspaceTextBoxValue(current, index, value);
-      inboxDraftsRef.current = nextTexts;
-      return nextTexts;
-    });
-    setIsInboxDirty(true);
-    setInboxSaveError("");
-  }, []);
-
-  const addInboxTextBox = useCallback(() => {
-    const nextIndex = inboxDraftsRef.current.length;
-    setInboxDrafts((current) => {
-      const nextTexts = [...current, ""];
-      inboxDraftsRef.current = nextTexts;
-      return nextTexts;
-    });
-    setActiveInboxBoxIndex(nextIndex);
-    setIsInboxDirty(true);
-    setInboxSaveError("");
-  }, []);
-
-  const clearInboxToHistory = useCallback(async () => {
-    if (!ownerKey || !isOwnerKeyValid || isInboxClearing) {
-      return;
-    }
-
-    const currentTexts = normalizeWorkspaceTextBoxes(inboxDraftsRef.current);
-    const activeIndex = clampWorkspaceTextBoxIndex(
-      activeInboxBoxIndexRef.current,
-      currentTexts,
-    );
-    const activeText = currentTexts[activeIndex] ?? "";
-    setIsInboxClearing(true);
-    setInboxSaveError("");
-    try {
-      const result = await clearWorkspaceInbox({
-        ownerKey,
-        index: activeIndex,
-        text: activeText,
-      });
-      const nextTexts = normalizeWorkspaceTextBoxes(result.texts, result.text);
-      setSavedInboxDrafts(nextTexts);
-      setInboxDrafts(nextTexts);
-      inboxDraftsRef.current = nextTexts;
-      setActiveInboxBoxIndex((current) => clampWorkspaceTextBoxIndex(current, nextTexts));
-      setIsInboxDirty(false);
-      setCopySnackbarMessage(
-        result.archived
-          ? 'Moved inbox text to "Inbox History"'
-          : "Inbox cleared",
-      );
-    } catch (error) {
-      setInboxSaveError(
-        error instanceof Error ? error.message : "Could not clear inbox.",
-      );
-    } finally {
-      setIsInboxClearing(false);
-    }
-  }, [
-    clearWorkspaceInbox,
-    isInboxClearing,
-    isOwnerKeyValid,
-    ownerKey,
-    setCopySnackbarMessage,
-  ]);
-
-  useEffect(() => {
-    if (!isRandomBoxOpen || !isRandomBoxDirty) {
-      setRandomBoxDrafts((current) =>
-        areWorkspaceTextBoxesEqual(current, savedRandomBoxDrafts)
-          ? current
-          : savedRandomBoxDrafts,
-      );
-      setActiveRandomBoxIndex((current) =>
-        clampWorkspaceTextBoxIndex(current, savedRandomBoxDrafts),
-      );
-    }
-  }, [isRandomBoxDirty, isRandomBoxOpen, savedRandomBoxDrafts]);
-
-  const saveRandomBoxDraft = useCallback(
-    async (texts: string[]) => {
-      if (!ownerKey || !isOwnerKeyValid) {
-        return;
-      }
-
-      const normalizedTexts = normalizeWorkspaceTextBoxes(texts);
-      setIsRandomBoxSaving(true);
-      setRandomBoxSaveError("");
-      try {
-        await setWorkspaceRandomBox({
-          ownerKey,
-          texts: normalizedTexts,
-        });
-        setSavedRandomBoxDrafts(normalizedTexts);
-        if (areWorkspaceTextBoxesEqual(randomBoxDraftsRef.current, normalizedTexts)) {
-          setIsRandomBoxDirty(false);
-        }
-      } catch (error) {
-        setRandomBoxSaveError(
-          error instanceof Error ? error.message : "Could not save random box.",
-        );
-      } finally {
-        setIsRandomBoxSaving(false);
-      }
-    },
-    [isOwnerKeyValid, ownerKey, setWorkspaceRandomBox],
-  );
-
-  const openRandomBox = useCallback(() => {
-    setRandomBoxSaveError("");
-    setRandomBoxDrafts(
-      savedRandomBoxDrafts,
-    );
-    setActiveRandomBoxIndex((current) =>
-      clampWorkspaceTextBoxIndex(current, savedRandomBoxDrafts),
-    );
-    setIsRandomBoxDirty(false);
-    setIsRandomBoxOpen(true);
-  }, [savedRandomBoxDrafts]);
-
-  const closeRandomBox = useCallback(() => {
-    if (isRandomBoxDirty) {
-      void saveRandomBoxDraft(randomBoxDraftsRef.current);
-    }
-    setIsRandomBoxOpen(false);
-  }, [isRandomBoxDirty, saveRandomBoxDraft]);
-
-  const updateRandomBoxDraftAtIndex = useCallback((index: number, value: string) => {
-    setRandomBoxDrafts((current) => {
-      const nextTexts = updateWorkspaceTextBoxValue(current, index, value);
-      randomBoxDraftsRef.current = nextTexts;
-      return nextTexts;
-    });
-    setIsRandomBoxDirty(true);
-    setRandomBoxSaveError("");
-  }, []);
-
-  const addRandomBoxTextBox = useCallback(() => {
-    const nextIndex = randomBoxDraftsRef.current.length;
-    setRandomBoxDrafts((current) => {
-      const nextTexts = [...current, ""];
-      randomBoxDraftsRef.current = nextTexts;
-      return nextTexts;
-    });
-    setActiveRandomBoxIndex(nextIndex);
-    setIsRandomBoxDirty(true);
-    setRandomBoxSaveError("");
-  }, []);
-
-  const chooseRandomBoxItem = useCallback(() => {
-    const currentTexts = normalizeWorkspaceTextBoxes(randomBoxDraftsRef.current);
-    const activeIndex = clampWorkspaceTextBoxIndex(
-      activeRandomBoxIndexRef.current,
-      currentTexts,
-    );
-    const items = (currentTexts[activeIndex] ?? "")
-      .split(/\r?\n/)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-    if (items.length === 0) {
-      setRandomBoxSelectedItem("");
-      return;
-    }
-
-    const selectedItem = items[Math.floor(Math.random() * items.length)] ?? "";
-    setRandomBoxSelectedItem(selectedItem);
-  }, []);
-
-  const saveWorkspaceAiMemoryDraft = useCallback(
-    async (text: string) => {
-      if (!ownerKey || !isOwnerKeyValid) {
-        return;
-      }
-
-      setIsWorkspaceAiMemorySaving(true);
-      setWorkspaceAiMemorySaveError("");
-      try {
-        const result = await setWorkspaceAiMemory({
-          ownerKey,
-          text,
-        });
-        setSavedWorkspaceAiMemoryDraft(result.text);
-        if (workspaceAiMemoryDraftRef.current === result.text) {
-          setIsWorkspaceAiMemoryDirty(false);
-        }
-      } catch (error) {
-        setWorkspaceAiMemorySaveError(
-          error instanceof Error ? error.message : "Could not save AI memory.",
-        );
-      } finally {
-        setIsWorkspaceAiMemorySaving(false);
-      }
-    },
-    [isOwnerKeyValid, ownerKey, setWorkspaceAiMemory],
-  );
-
-  const updateWorkspaceAiMemoryDraft = useCallback((value: string) => {
-    setWorkspaceAiMemoryDraft(value);
-    workspaceAiMemoryDraftRef.current = value;
-    setWorkspaceAiMemorySaveError("");
-  }, []);
-
-  const closeWorkspaceChat = useCallback(() => {
-    if (isWorkspaceAiMemoryDirty) {
-      void saveWorkspaceAiMemoryDraft(workspaceAiMemoryDraftRef.current);
-    }
-    setIsWorkspaceChatOpen(false);
-    setWorkspaceChatError("");
-  }, [isWorkspaceAiMemoryDirty, saveWorkspaceAiMemoryDraft]);
-
-  useEffect(() => {
-    if (!isInboxOpen || !isInboxDirty || isInboxClearing) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      if (!isInboxSaving) {
-        void saveInboxDraft(inboxDraftsRef.current);
-      }
-    }, 900);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [isInboxClearing, isInboxDirty, isInboxOpen, isInboxSaving, saveInboxDraft]);
-
-  useEffect(() => {
-    if (!isRandomBoxOpen || !isRandomBoxDirty) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      if (!isRandomBoxSaving) {
-        void saveRandomBoxDraft(randomBoxDraftsRef.current);
-      }
-    }, 900);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [isRandomBoxDirty, isRandomBoxOpen, isRandomBoxSaving, saveRandomBoxDraft]);
-
-  useEffect(() => {
-    if (!isWorkspaceChatOpen || !isWorkspaceAiMemoryDirty) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      if (!isWorkspaceAiMemorySaving) {
-        void saveWorkspaceAiMemoryDraft(workspaceAiMemoryDraftRef.current);
-      }
-    }, 900);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [
-    isWorkspaceAiMemoryDirty,
-    isWorkspaceAiMemorySaving,
-    isWorkspaceChatOpen,
-    saveWorkspaceAiMemoryDraft,
-  ]);
-
-  useEffect(() => {
-    setRandomBoxSelectedItem("");
-  }, [activeRandomBoxIndex]);
-
-  const safeActiveInboxBoxIndex = clampWorkspaceTextBoxIndex(activeInboxBoxIndex, inboxDrafts);
-  const activeInboxDraft = inboxDrafts[safeActiveInboxBoxIndex] ?? "";
-  const safeActiveRandomBoxIndex = clampWorkspaceTextBoxIndex(
-    activeRandomBoxIndex,
-    randomBoxDrafts,
-  );
-  const activeRandomBoxDraft = randomBoxDrafts[safeActiveRandomBoxIndex] ?? "";
 
   useEffect(() => {
     if (!dragSelection) {
@@ -10969,116 +10127,6 @@ function ConfiguredWorkspace({
   }, [paletteOpen, paletteMode]);
 
   useEffect(() => {
-    if (!isWorkspaceChatOpen) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      focusWorkspaceAiChatInput();
-    }, 0);
-
-    return () => window.clearTimeout(timeout);
-  }, [isWorkspaceChatOpen, isWorkspaceChatPinned]);
-
-  useEffect(() => {
-    if (!isWorkspaceChatOpen) {
-      return;
-    }
-
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-
-      const targetElement =
-        target instanceof Element ? target : target.parentElement;
-      if (
-        targetElement?.closest(
-          "[data-workspace-ai-chat-panel='true'], [data-workspace-ai-chat-toggle='true']",
-        )
-      ) {
-        return;
-      }
-
-      closeWorkspaceChat();
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-    };
-  }, [closeWorkspaceChat, isWorkspaceChatOpen]);
-
-  useEffect(() => {
-    if (!isInboxOpen) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      document.getElementById(WORKSPACE_INBOX_TEXTAREA_ID)?.focus();
-    }, 0);
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeInbox();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.clearTimeout(timeout);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [closeInbox, isInboxOpen]);
-
-  useEffect(() => {
-    if (!isRandomBoxOpen) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      document.getElementById(WORKSPACE_RANDOM_BOX_TEXTAREA_ID)?.focus();
-    }, 0);
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRandomBox();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.clearTimeout(timeout);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [closeRandomBox, isRandomBoxOpen]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.sessionStorage.setItem(
-      WORKSPACE_AI_CHAT_OPEN_STORAGE_KEY,
-      isWorkspaceChatOpen ? "true" : "false",
-    );
-  }, [isWorkspaceChatOpen]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.sessionStorage.setItem(
-      WORKSPACE_AI_CHAT_PINNED_STORAGE_KEY,
-      isWorkspaceChatPinned ? "true" : "false",
-    );
-  }, [isWorkspaceChatPinned]);
-
-  useEffect(() => {
     if (
       !paletteOpen ||
       paletteMode === "archive" ||
@@ -11356,18 +10404,6 @@ function ConfiguredWorkspace({
         return;
       }
 
-      if (isModifier && event.shiftKey && normalizedKey === "l") {
-        event.preventDefault();
-        toggleWorkspaceChat();
-        return;
-      }
-
-      if (isModifier && event.shiftKey && normalizedKey === "r") {
-        event.preventDefault();
-        openRandomBox();
-        return;
-      }
-
       if (isModifier && event.shiftKey && normalizedKey === "k") {
         event.preventDefault();
         void copyFocusedLinkToClipboard(event.target);
@@ -11489,12 +10525,6 @@ function ConfiguredWorkspace({
           setPaletteMode("pages");
           setTextSearchResults([]);
           setNodeSearchResults([]);
-          return;
-        }
-
-        if (isWorkspaceChatOpen) {
-          event.preventDefault();
-          closeWorkspaceChat();
           return;
         }
 
@@ -11655,15 +10685,11 @@ function ConfiguredWorkspace({
     focusLastVisiblePageNode,
     indentHighlightedNodeByKeyboard,
     moveHighlightedNodeByKeyboard,
-    openRandomBox,
     openPalette,
     selectionAnchorNodeId,
-    toggleWorkspaceChat,
     cyclePaletteMode,
-    closeWorkspaceChat,
     isShortcutsOpen,
     paletteOpen,
-    isWorkspaceChatOpen,
     clearNodeSelection,
     setExplicitSelectedNodeIds,
     selectNodeRange,
@@ -11833,7 +10859,6 @@ function ConfiguredWorkspace({
 
   const handleSelectPage = useCallback((pageId: Id<"pages">) => {
     const page = pagesById.get(pageId as string);
-    setIsWorkspaceChatOpen(false);
     setPendingPalettePageAction(null);
     setActionContextSelectedNodeIds([]);
     setSelectedPageId(pageId);
@@ -11857,7 +10882,6 @@ function ConfiguredWorkspace({
       nodeId: Id<"nodes">,
       title?: string | null,
     ) => {
-      setIsWorkspaceChatOpen(false);
       setSelectedPageId(pageId);
       setLocationPageId(pageId);
       setLocationFocusedNodeId(nodeId as string);
@@ -11879,7 +10903,6 @@ function ConfiguredWorkspace({
       return;
     }
 
-    setIsWorkspaceChatOpen(false);
     if (isSidebarSpecialPage(result.page)) {
       setIsSidebarCollapsed(false);
       setPendingRevealNodeId(result.node._id as string);
@@ -11955,7 +10978,6 @@ function ConfiguredWorkspace({
       setPendingPalettePageAction(null);
       setActionContextSelectedNodeIds([]);
       if (isSidebarFavoriteNode) {
-        setIsWorkspaceChatOpen(false);
         setIsSidebarCollapsed(false);
         setPendingRevealNodeId(nodeId as string);
         setPaletteOpen(false);
@@ -11995,7 +11017,6 @@ function ConfiguredWorkspace({
       const targetNodeTitle =
         normalizeNodeLinkPreviewDisplay(targetNode.text).text || targetPage.title;
 
-      setIsWorkspaceChatOpen(false);
       setPendingPalettePageAction(null);
       setActionContextSelectedNodeIds([]);
       setSelectedPageId(targetPageId);
@@ -12090,7 +11111,7 @@ function ConfiguredWorkspace({
   ]);
 
   useEffect(() => {
-    if (!focusedNodeId || paletteOpen || isWorkspaceChatOpen || isInboxOpen || isRandomBoxOpen) {
+    if (!focusedNodeId || paletteOpen) {
       return;
     }
 
@@ -12115,9 +11136,6 @@ function ConfiguredWorkspace({
   }, [
     focusedNodeId,
     handleExitFocusedNode,
-    isInboxOpen,
-    isRandomBoxOpen,
-    isWorkspaceChatOpen,
     paletteOpen,
   ]);
 
@@ -12164,86 +11182,6 @@ function ConfiguredWorkspace({
       });
     },
     [favoritedNodeIds, ownerKey, setSidebarFavorite],
-  );
-
-  const handleWorkspaceChatSubmit = useCallback(async () => {
-    const question = workspaceChatDraft.trim();
-    if (question.length === 0) {
-      return;
-    }
-
-    setIsWorkspaceChatLoading(true);
-    setWorkspaceChatError("");
-    try {
-      if (isWorkspaceAiMemoryDirty) {
-        await saveWorkspaceAiMemoryDraft(workspaceAiMemoryDraftRef.current);
-      }
-
-      const explicitTargets = resolveExplicitKnowledgeLinkTargets(
-        question,
-        pagesByTitle,
-        pagesById,
-      );
-      await chatWithWorkspace({
-        ownerKey,
-        question,
-        limit: 10,
-        linkedPageIds: explicitTargets.linkedPageIds,
-        linkedNodeIds: explicitTargets.linkedNodeIds,
-      });
-      setWorkspaceChatDraft("");
-    } catch (error) {
-      setWorkspaceChatError(
-        error instanceof Error
-          ? error.message
-          : "Knowledge-base chat failed.",
-      );
-    } finally {
-      setIsWorkspaceChatLoading(false);
-    }
-  }, [
-    chatWithWorkspace,
-    isWorkspaceAiMemoryDirty,
-    ownerKey,
-    pagesById,
-    pagesByTitle,
-    saveWorkspaceAiMemoryDraft,
-    workspaceChatDraft,
-  ]);
-
-  const handleApplyWorkspaceChatPlan = useCallback(
-    async (messageId: Id<"chatMessages">) => {
-      setApplyingWorkspaceChatPlanMessageIds((current) => {
-        const next = new Set(current);
-        next.add(messageId as string);
-        return next;
-      });
-      setWorkspaceChatError("");
-      try {
-        await runTrackedMutation(
-          () =>
-            applyApprovedChatPlanRaw({
-              ownerKey,
-              messageId,
-            }),
-          {},
-          "Could not apply AI changes.",
-        );
-      } catch (error) {
-        setWorkspaceChatError(
-          error instanceof Error
-            ? error.message
-            : "Could not apply AI changes.",
-        );
-      } finally {
-        setApplyingWorkspaceChatPlanMessageIds((current) => {
-          const next = new Set(current);
-          next.delete(messageId as string);
-          return next;
-        });
-      }
-    },
-    [applyApprovedChatPlanRaw, ownerKey, runTrackedMutation],
   );
 
   const handleArchivePage = async (page: PageDoc, archived: boolean) => {
@@ -12787,52 +11725,6 @@ function ConfiguredWorkspace({
           </div>
         ) : null}
         <div className="pointer-events-auto flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 border border-[var(--workspace-border)] bg-[color-mix(in_srgb,var(--workspace-surface)_88%,transparent)] px-2 py-2 shadow-[0_18px_40px_-28px_rgba(0,0,0,0.5)] backdrop-blur-sm">
-          <button
-            type="button"
-            data-workspace-ai-chat-toggle="true"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={toggleWorkspaceChat}
-            title="AI chat"
-            aria-label="AI chat"
-            className={clsx(
-              "flex h-10 w-10 items-center justify-center border text-lg transition",
-              isWorkspaceChatOpen
-                ? "border-[var(--workspace-brand)] bg-[var(--workspace-brand)] text-[var(--workspace-inverse-text)]"
-                : "border-[var(--workspace-border)] text-[var(--workspace-text-muted)] hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]",
-            )}
-          >
-            🤖
-          </button>
-          <button
-            type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={openInbox}
-            title="Inbox"
-            aria-label="Inbox"
-            className={clsx(
-              "flex h-10 w-10 items-center justify-center border text-lg transition",
-              isInboxOpen
-                ? "border-[var(--workspace-brand)] bg-[var(--workspace-brand)] text-[var(--workspace-inverse-text)]"
-                : "border-[var(--workspace-border)] text-[var(--workspace-text-muted)] hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]",
-            )}
-          >
-            📥
-          </button>
-          <button
-            type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={openRandomBox}
-            title="Random box"
-            aria-label="Random box"
-            className={clsx(
-              "flex h-10 w-10 items-center justify-center border text-lg transition",
-              isRandomBoxOpen
-                ? "border-[var(--workspace-brand)] bg-[var(--workspace-brand)] text-[var(--workspace-inverse-text)]"
-                : "border-[var(--workspace-border)] text-[var(--workspace-text-muted)] hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]",
-            )}
-          >
-            🗃️
-          </button>
           {floatingPinnedActionResults.map((result) => (
             <button
               key={`floating-pinned-action-${result.key}`}
@@ -13013,45 +11905,10 @@ function ConfiguredWorkspace({
           </div>
         ) : null}
       </div>
-      {isWorkspaceChatOpen && !isWorkspaceChatPinned ? (
-        <div className="mx-auto flex h-dvh max-h-dvh w-full max-w-6xl flex-col px-4 pb-[calc(env(safe-area-inset-bottom,0px)+7rem)] pt-24 sm:px-8 sm:pb-[calc(env(safe-area-inset-bottom,0px)+2rem)] sm:pt-28">
-          <div
-            data-workspace-ai-chat-panel="true"
-            className="min-h-0 flex-1 overflow-hidden border border-[var(--workspace-border)] bg-[var(--workspace-surface-muted)] shadow-[0_30px_90px_-45px_rgba(53,41,24,0.45)]"
-          >
-            <WorkspaceAiChatPanel
-              ownerKey={ownerKey}
-              availableTags={sortedTags}
-              draft={workspaceChatDraft}
-              onDraftChange={setWorkspaceChatDraft}
-              onSubmit={() => void handleWorkspaceChatSubmit()}
-              messages={workspaceChatMessages}
-              isLoading={isWorkspaceChatLoading}
-              error={workspaceChatError}
-              onClearError={() => setWorkspaceChatError("")}
-              memoryDraft={workspaceAiMemoryDraft}
-              onMemoryDraftChange={updateWorkspaceAiMemoryDraft}
-              isMemoryDirty={isWorkspaceAiMemoryDirty}
-              isMemorySaving={isWorkspaceAiMemorySaving}
-              memorySaveError={workspaceAiMemorySaveError}
-              onSaveMemory={() => void saveWorkspaceAiMemoryDraft(workspaceAiMemoryDraftRef.current)}
-              applyingPlanMessageIds={applyingWorkspaceChatPlanMessageIds}
-              onApplyPlan={handleApplyWorkspaceChatPlan}
-              onDismiss={closeWorkspaceChat}
-              isPinned={isWorkspaceChatPinned}
-              onPinnedChange={setIsWorkspaceChatPinned}
-              isMobileLayout={isMobileLayout}
-            />
-          </div>
-        </div>
-      ) : null}
         <div
           className={clsx(
             "mx-auto grid min-h-screen max-w-[1600px] grid-cols-1 transition-[grid-template-columns] duration-300 ease-out motion-reduce:transition-none",
-            isWorkspaceChatOpen && !isWorkspaceChatPinned ? "hidden" : "",
-            isWorkspaceChatOpen && isWorkspaceChatPinned
-              ? "pb-[calc(env(safe-area-inset-bottom,0px)+24rem)] md:pb-[calc(env(safe-area-inset-bottom,0px)+26rem)]"
-              : "pb-36 md:pb-44",
+            "pb-36 md:pb-44",
           )}
         style={
           isMobileLayout
@@ -15997,240 +14854,6 @@ function ConfiguredWorkspace({
           </div>
         </div>
       ) : null}
-      {isWorkspaceChatOpen && isWorkspaceChatPinned ? (
-        <div className="fixed inset-x-0 bottom-0 z-50 mx-auto flex h-[min(54dvh,28rem)] w-full max-w-6xl flex-col px-3 pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] sm:h-[min(46dvh,26rem)] sm:px-6">
-          <div
-            data-workspace-ai-chat-panel="true"
-            className="min-h-0 flex-1 overflow-hidden border border-[var(--workspace-border)] bg-[color-mix(in_srgb,var(--workspace-surface-muted)_96%,transparent)] shadow-[0_-24px_70px_-42px_rgba(0,0,0,0.65)] backdrop-blur-sm"
-          >
-            <WorkspaceAiChatPanel
-              ownerKey={ownerKey}
-              availableTags={sortedTags}
-              draft={workspaceChatDraft}
-              onDraftChange={setWorkspaceChatDraft}
-              onSubmit={() => void handleWorkspaceChatSubmit()}
-              messages={workspaceChatMessages}
-              isLoading={isWorkspaceChatLoading}
-              error={workspaceChatError}
-              onClearError={() => setWorkspaceChatError("")}
-              memoryDraft={workspaceAiMemoryDraft}
-              onMemoryDraftChange={updateWorkspaceAiMemoryDraft}
-              isMemoryDirty={isWorkspaceAiMemoryDirty}
-              isMemorySaving={isWorkspaceAiMemorySaving}
-              memorySaveError={workspaceAiMemorySaveError}
-              onSaveMemory={() => void saveWorkspaceAiMemoryDraft(workspaceAiMemoryDraftRef.current)}
-              applyingPlanMessageIds={applyingWorkspaceChatPlanMessageIds}
-              onApplyPlan={handleApplyWorkspaceChatPlan}
-              onDismiss={closeWorkspaceChat}
-              isPinned={isWorkspaceChatPinned}
-              onPinnedChange={setIsWorkspaceChatPinned}
-              isMobileLayout={isMobileLayout}
-            />
-          </div>
-        </div>
-      ) : null}
-      {isInboxOpen ? (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4"
-          onClick={closeInbox}
-        >
-          <div
-            className="flex h-[min(34rem,78vh)] w-full max-w-3xl flex-col border border-[var(--workspace-border)] bg-[var(--workspace-surface)] shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-center justify-between gap-4 border-b border-[var(--workspace-border)] px-4 py-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--workspace-accent)]">
-                  Inbox
-                </p>
-                <p className="mt-1 text-xs text-[var(--workspace-text-faint)]">
-                  Plain text. Each box auto-saves to the workspace.
-                </p>
-              </div>
-              <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                {isInboxSaving ? <span>Saving…</span> : null}
-                {isInboxClearing ? <span>Clearing…</span> : null}
-                {isInboxDirty && !isInboxSaving ? <span>Unsaved</span> : null}
-                <button
-                  type="button"
-                  onClick={() => void clearInboxToHistory()}
-                  disabled={
-                    isInboxClearing || isInboxSaving || activeInboxDraft.trim().length === 0
-                  }
-                  className="border border-[var(--workspace-border)] px-3 py-2 text-[10px] font-semibold tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Clear
-                </button>
-                <button
-                  type="button"
-                  onClick={closeInbox}
-                  disabled={isInboxClearing}
-                  className="border border-[var(--workspace-border)] px-3 py-2 text-[10px] font-semibold tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 border-b border-[var(--workspace-border)] px-4 py-3">
-              {inboxDrafts.map((_, index) => (
-                <button
-                  key={`inbox-box-${index}`}
-                  type="button"
-                  onClick={() => setActiveInboxBoxIndex(index)}
-                  className={clsx(
-                    "min-w-[2.5rem] border px-3 py-2 text-xs font-semibold tracking-[0.18em] transition",
-                    safeActiveInboxBoxIndex === index
-                      ? "border-[var(--workspace-brand)] bg-[color-mix(in_srgb,var(--workspace-brand)_14%,var(--workspace-surface))] text-[var(--workspace-text)]"
-                      : "border-[var(--workspace-border)] text-[var(--workspace-text-muted)] hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]",
-                  )}
-                >
-                  {index + 1}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={addInboxTextBox}
-                className="min-w-[2.5rem] border border-[var(--workspace-border)] px-3 py-2 text-xs font-semibold tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-              >
-                +
-              </button>
-            </div>
-            <div className="flex-1 p-4">
-              <PlainTextBlockEditor
-                id={WORKSPACE_INBOX_TEXTAREA_ID}
-                value={activeInboxDraft}
-                onChange={(value) => {
-                  updateInboxDraftAtIndex(
-                    safeActiveInboxBoxIndex,
-                    value,
-                  );
-                }}
-                placeholder="Drop notes, thoughts, and loose tasks here…"
-                className="border border-[var(--workspace-border)] bg-[var(--workspace-surface-muted)] px-4 py-3 text-sm leading-7 text-[var(--workspace-text)] transition focus:border-[var(--workspace-accent)]"
-              />
-            </div>
-            {inboxSaveError ? (
-              <div className="border-t border-[var(--workspace-border)] px-4 py-3 text-sm text-[var(--workspace-danger)]">
-                {inboxSaveError}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-      {isRandomBoxOpen ? (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4"
-          onClick={closeRandomBox}
-        >
-          <div
-            className="flex h-[min(34rem,78vh)] w-full max-w-3xl flex-col border border-[var(--workspace-border)] bg-[var(--workspace-surface)] shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-center justify-between gap-4 border-b border-[var(--workspace-border)] px-4 py-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--workspace-accent)]">
-                  Random Box
-                </p>
-                <p className="mt-1 text-xs text-[var(--workspace-text-faint)]">
-                  One item per line. Each box auto-saves to the workspace.
-                </p>
-              </div>
-              <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                {isRandomBoxSaving ? <span>Saving…</span> : null}
-                {isRandomBoxDirty && !isRandomBoxSaving ? <span>Unsaved</span> : null}
-                <button
-                  type="button"
-                  onClick={closeRandomBox}
-                  className="border border-[var(--workspace-border)] px-3 py-2 text-[10px] font-semibold tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 border-b border-[var(--workspace-border)] px-4 py-3">
-              {randomBoxDrafts.map((_, index) => (
-                <button
-                  key={`random-box-${index}`}
-                  type="button"
-                  onClick={() => setActiveRandomBoxIndex(index)}
-                  className={clsx(
-                    "min-w-[2.5rem] border px-3 py-2 text-xs font-semibold tracking-[0.18em] transition",
-                    safeActiveRandomBoxIndex === index
-                      ? "border-[var(--workspace-brand)] bg-[color-mix(in_srgb,var(--workspace-brand)_14%,var(--workspace-surface))] text-[var(--workspace-text)]"
-                      : "border-[var(--workspace-border)] text-[var(--workspace-text-muted)] hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]",
-                  )}
-                >
-                  {index + 1}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={addRandomBoxTextBox}
-                className="min-w-[2.5rem] border border-[var(--workspace-border)] px-3 py-2 text-xs font-semibold tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-              >
-                +
-              </button>
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-4 p-4">
-              <div className="flex items-center justify-between gap-3 border border-[var(--workspace-border)] bg-[var(--workspace-surface-muted)] px-3 py-2">
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--workspace-text-faint)]">
-                    Pick
-                  </p>
-                  <p className="mt-1 text-xs text-[var(--workspace-text-subtle)]">
-                    Randomly selects one non-empty line from the list.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={chooseRandomBoxItem}
-                  className="border border-[var(--workspace-brand)] bg-[var(--workspace-brand)] px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-inverse-text)] transition hover:brightness-110"
-                >
-                  Random
-                </button>
-              </div>
-              <textarea
-                value={randomBoxSelectedItem}
-                onChange={(event) => setRandomBoxSelectedItem(event.target.value)}
-                placeholder="Random item will show here…"
-                rows={3}
-                className="min-h-[6rem] resize-none border border-[var(--workspace-border)] bg-[color-mix(in_srgb,var(--workspace-brand)_8%,var(--workspace-surface-muted))] px-4 py-3 text-base font-semibold leading-7 text-[var(--workspace-text)] outline-none transition focus:border-[var(--workspace-accent)]"
-              />
-              <div className="min-h-0 flex-1 border border-[var(--workspace-border)] bg-[var(--workspace-surface-muted)]">
-                <button
-                  type="button"
-                  onClick={() => setIsRandomBoxListCollapsed((current) => !current)}
-                  className="flex w-full items-center justify-between gap-3 border-b border-[var(--workspace-border)] px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.2em] text-[var(--workspace-text-muted)] transition hover:text-[var(--workspace-text)]"
-                >
-                  <span>Items</span>
-                  <span>{isRandomBoxListCollapsed ? "Show" : "Hide"}</span>
-                </button>
-                {!isRandomBoxListCollapsed ? (
-                  <div className="h-[calc(100%-2.75rem)] min-h-[10rem] p-3">
-                    <PlainTextBlockEditor
-                      id={WORKSPACE_RANDOM_BOX_TEXTAREA_ID}
-                      value={activeRandomBoxDraft}
-                      onChange={(value) => {
-                        updateRandomBoxDraftAtIndex(
-                          safeActiveRandomBoxIndex,
-                          value,
-                        );
-                      }}
-                      placeholder={"Write one item per line…\nExample one\nExample two"}
-                      className="border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-4 py-3 text-sm leading-7 text-[var(--workspace-text)] transition focus:border-[var(--workspace-accent)]"
-                    />
-                  </div>
-                ) : null}
-              </div>
-            </div>
-            {randomBoxSaveError ? (
-              <div className="border-t border-[var(--workspace-border)] px-4 py-3 text-sm text-[var(--workspace-danger)]">
-                {randomBoxSaveError}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
       {isShortcutsOpen ? (
         <ShortcutsSheet onDismiss={() => setIsShortcutsOpen(false)} />
       ) : null}
@@ -16314,66 +14937,6 @@ function AiPromptEditorPanel({
       </div>
       <p className="mt-3 text-xs leading-5 text-[var(--workspace-text-faint)]">{helperText}</p>
     </div>
-  );
-}
-
-function PlainTextBlockEditor({
-  id,
-  value,
-  onChange,
-  placeholder,
-  className,
-}: {
-  id?: string;
-  value: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-  className?: string;
-}) {
-  const editorRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) {
-      return;
-    }
-
-    const currentValue = readPlainTextBlockEditorValue(editor);
-    const normalizedValue = normalizePlainTextBlockEditorValue(value);
-    if (currentValue === normalizedValue) {
-      return;
-    }
-
-    writePlainTextBlockEditorValue(editor, normalizedValue);
-  }, [value]);
-
-  return (
-    <div
-      id={id}
-      ref={editorRef}
-      contentEditable
-      suppressContentEditableWarning
-      data-placeholder={placeholder}
-      spellCheck
-      onInput={(event) => {
-        onChange(readPlainTextBlockEditorValue(event.currentTarget));
-      }}
-      onPaste={(event) => {
-        const pastedText = getPreferredClipboardText(event.clipboardData);
-        if (pastedText.length === 0) {
-          return;
-        }
-        event.preventDefault();
-        if (!insertPlainTextIntoContentEditable(pastedText)) {
-          return;
-        }
-        onChange(readPlainTextBlockEditorValue(event.currentTarget));
-      }}
-      className={clsx(
-        "plain-text-block-editor h-full w-full overflow-y-auto outline-none",
-        className,
-      )}
-    />
   );
 }
 
@@ -18668,579 +17231,6 @@ function getNodeTypographyClass({
   }
 
   return "py-0.5 text-[15px] leading-[1.45rem]";
-}
-
-function WorkspaceAiChatPanel({
-  ownerKey,
-  availableTags,
-  draft,
-  onDraftChange,
-  onSubmit,
-  messages,
-  isLoading,
-  error,
-  onClearError,
-  memoryDraft,
-  onMemoryDraftChange,
-  isMemoryDirty,
-  isMemorySaving,
-  memorySaveError,
-  onSaveMemory,
-  applyingPlanMessageIds,
-  onApplyPlan,
-  onDismiss,
-  isPinned,
-  onPinnedChange,
-  isMobileLayout,
-}: {
-  ownerKey: string;
-  availableTags: SidebarTagResult[];
-  draft: string;
-  onDraftChange: (value: string) => void;
-  onSubmit: () => void;
-  messages: Doc<"chatMessages">[];
-  isLoading: boolean;
-  error: string;
-  onClearError: () => void;
-  memoryDraft: string;
-  onMemoryDraftChange: (value: string) => void;
-  isMemoryDirty: boolean;
-  isMemorySaving: boolean;
-  memorySaveError: string;
-  onSaveMemory: () => void;
-  applyingPlanMessageIds: Set<string>;
-  onApplyPlan: (messageId: Id<"chatMessages">) => void;
-  onDismiss: () => void;
-  isPinned: boolean;
-  onPinnedChange: (nextValue: boolean) => void;
-  isMobileLayout: boolean;
-}) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const memoryTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const historyRef = useRef<HTMLDivElement>(null);
-  const historyEndRef = useRef<HTMLDivElement>(null);
-  const shouldStickHistoryToBottomRef = useRef(true);
-  const [caretPosition, setCaretPosition] = useState<number | null>(null);
-  const [linkHighlightIndex, setLinkHighlightIndex] = useState(0);
-  const [isShowingRequest, setIsShowingRequest] = useState(false);
-  const [isShowingRequestStructure, setIsShowingRequestStructure] = useState(false);
-  const [isMemoryExpanded, setIsMemoryExpanded] = useState(false);
-  const activeLinkToken = getActiveLinkToken(draft, caretPosition);
-  const activeTagToken = activeLinkToken ? null : getActiveTagToken(draft, caretPosition);
-  const { suggestions: linkSuggestions, isLoading: isLinkSearchLoading } =
-    useLinkTargetSuggestions({
-      ownerKey,
-      activeLinkToken,
-    });
-  const isTagsAutocompleteLoading = useContext(TagAutocompleteLoadingContext);
-  const tagSuggestions = useMemo(
-    () =>
-      activeTagToken ? buildTagSuggestions(availableTags, activeTagToken.query) : [],
-    [activeTagToken, availableTags],
-  );
-  const autocompleteToken = activeLinkToken ?? activeTagToken;
-  const autocompleteSuggestions = activeLinkToken ? linkSuggestions : tagSuggestions;
-  const activeLinkHighlightIndex =
-    autocompleteSuggestions.length === 0
-      ? 0
-      : Math.min(linkHighlightIndex, autocompleteSuggestions.length - 1);
-  const showHistoryPanel = messages.length > 0 || error.length > 0 || isLoading;
-  const latestAssistantMetadata = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (!message || message.role !== "assistant") {
-        continue;
-      }
-      const metadata = readWorkspaceKnowledgeMessageMetadata(message);
-      if (metadata?.request) {
-        return metadata;
-      }
-    }
-    return null;
-  }, [messages]);
-  const requestButtonLabel = isShowingRequest
-    ? (isMobileLayout ? "Hide SR" : "Hide Request")
-    : (isMobileLayout ? "SR" : "Show Request");
-  const requestStructureButtonLabel = isShowingRequestStructure
-    ? (isMobileLayout ? "Hide SRC" : "Hide Request Structure")
-    : (isMobileLayout ? "SRC" : "Show Request Structure");
-  const dismissButtonLabel = isMobileLayout ? "DSM" : "Dismiss";
-  const pinButtonLabel = isPinned ? "Unpin" : "Pin";
-  const memoryExpandButtonLabel = isMemoryExpanded ? "Collapse" : "Expand";
-  const memoryStatusLabel = isMemorySaving
-    ? "Saving..."
-    : isMemoryDirty
-      ? "Unsaved"
-      : "Saved";
-  const requestStructurePreview = useMemo(
-    () =>
-      [
-        "System prompt:",
-        "Today is ___ ___, ____.",
-        "Answer using only the AI Working Memory plain text note.",
-        "",
-        "User prompt structure:",
-        "Recent conversation",
-        "User message: ...",
-        "AI Working Memory plain text:",
-        "# Live",
-        "# Previous",
-      ].join("\n"),
-    [],
-  );
-
-  useEffect(() => {
-    autoResizeTextarea(textareaRef.current);
-  }, [draft]);
-
-  useEffect(() => {
-    if (memoryTextareaRef.current) {
-      memoryTextareaRef.current.style.height = "";
-    }
-  }, [isMemoryExpanded]);
-
-  useEffect(() => {
-    const container = historyRef.current;
-    if (!container) {
-      return;
-    }
-
-    if (!shouldStickHistoryToBottomRef.current) {
-      return;
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      container.scrollTop = container.scrollHeight;
-      historyEndRef.current?.scrollIntoView({ block: "end" });
-    });
-
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [error, isLoading, messages]);
-
-  const applyLinkSuggestion = (
-    suggestion: LinkSuggestion,
-    options: { useParentTarget?: boolean } = {},
-  ) => {
-    if (!autocompleteToken) {
-      return;
-    }
-
-    const insertText = getLinkSuggestionInsertText(suggestion, options, {
-      value: draft,
-      tokenEndIndex: autocompleteToken.endIndex,
-    });
-    const nextValue =
-      draft.slice(0, autocompleteToken.startIndex) +
-      insertText +
-      draft.slice(autocompleteToken.endIndex);
-    const nextCaretPosition = autocompleteToken.startIndex + insertText.length;
-
-    onDraftChange(nextValue);
-    setCaretPosition(nextCaretPosition);
-    window.requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(nextCaretPosition, nextCaretPosition);
-    });
-  };
-
-  const handleKeyDown = (event: TextareaKeyboardEvent<HTMLTextAreaElement>) => {
-    if (autocompleteToken && autocompleteSuggestions.length > 0) {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setLinkHighlightIndex((current) =>
-          Math.min(current + 1, autocompleteSuggestions.length - 1),
-        );
-        return;
-      }
-
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setLinkHighlightIndex((current) => Math.max(current - 1, 0));
-        return;
-      }
-
-      if (event.key === "Enter" && (!event.shiftKey || activeLinkToken)) {
-        event.preventDefault();
-        const highlighted = autocompleteSuggestions[activeLinkHighlightIndex];
-        if (highlighted) {
-          applyLinkSuggestion(highlighted, {
-            useParentTarget: event.shiftKey && Boolean(activeLinkToken),
-          });
-        }
-        return;
-      }
-
-      if (event.key === "Tab") {
-        const highlighted = autocompleteSuggestions[activeLinkHighlightIndex];
-        if (highlighted) {
-          event.preventDefault();
-          applyLinkSuggestion(highlighted);
-          return;
-        }
-      }
-    }
-
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      shouldStickHistoryToBottomRef.current = true;
-      onSubmit();
-    }
-  };
-
-  return (
-    <div
-      data-workspace-ai-chat-panel="true"
-      className="flex h-full min-h-0 flex-col overflow-hidden"
-    >
-      <div className="sticky top-0 z-10 border-b border-[var(--workspace-border-subtle)] bg-[var(--workspace-surface-muted)]">
-      <div className="flex items-center justify-between gap-3 px-5 py-3">
-        <div className="min-w-0">
-          <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-accent)]">
-            AI Chat
-          </p>
-          <p className="text-[11px] text-[var(--workspace-text-faint)]">
-            {messages.length > 0
-              ? `${messages.length} message${messages.length === 1 ? "" : "s"} saved`
-              : "Persistent workspace conversation"}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => onPinnedChange(!isPinned)}
-            title={isPinned ? "Unpin AI chat from the bottom" : "Pin AI chat to the bottom"}
-            aria-label={isPinned ? "Unpin AI chat from the bottom" : "Pin AI chat to the bottom"}
-            aria-pressed={isPinned}
-            className={clsx(
-              "border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] transition",
-              isPinned
-                ? "border-[var(--workspace-brand)] bg-[var(--workspace-brand)] text-[var(--workspace-inverse-text)]"
-                : "border-[var(--workspace-border)] text-[var(--workspace-text-muted)] hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]",
-            )}
-          >
-            {pinButtonLabel}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setIsShowingRequest((current) => !current);
-              if (!isShowingRequest) {
-                setIsShowingRequestStructure(false);
-              }
-            }}
-            disabled={!latestAssistantMetadata?.request}
-            className="border border-[var(--workspace-border)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {requestButtonLabel}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setIsShowingRequestStructure((current) => !current);
-              if (!isShowingRequestStructure) {
-                setIsShowingRequest(false);
-              }
-            }}
-            className="border border-[var(--workspace-border)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-          >
-            {requestStructureButtonLabel}
-          </button>
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="border border-[var(--workspace-border)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-          >
-            {dismissButtonLabel}
-          </button>
-        </div>
-      </div>
-      {isShowingRequest && latestAssistantMetadata?.request ? (
-        <div className="border-t border-[var(--workspace-border-subtle)] px-5 py-4">
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border border-[var(--workspace-border-subtle)] bg-[color-mix(in_srgb,var(--workspace-surface)_70%,black)] px-3 py-3 text-xs leading-6 text-[var(--workspace-text-subtle)]">
-            {latestAssistantMetadata.request}
-          </pre>
-        </div>
-      ) : null}
-      {isShowingRequestStructure ? (
-        <div className="border-t border-[var(--workspace-border-subtle)] px-5 py-4">
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border border-[var(--workspace-border-subtle)] bg-[color-mix(in_srgb,var(--workspace-surface)_70%,black)] px-3 py-3 text-xs leading-6 text-[var(--workspace-text-subtle)]">
-            {requestStructurePreview}
-          </pre>
-        </div>
-      ) : null}
-      <div className="border-t border-[var(--workspace-border-subtle)] px-5 py-4">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-accent)]">
-              Working Memory
-            </p>
-            <p className="mt-1 text-[11px] text-[var(--workspace-text-faint)]">
-              Plain text memory for this chat
-            </p>
-          </div>
-          <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-            <span>{memoryStatusLabel}</span>
-            <button
-              type="button"
-              onClick={() => setIsMemoryExpanded((current) => !current)}
-              aria-expanded={isMemoryExpanded}
-              className="border border-[var(--workspace-border)] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-            >
-              {memoryExpandButtonLabel}
-            </button>
-            <button
-              type="button"
-              onClick={onSaveMemory}
-              disabled={isMemorySaving || !isMemoryDirty}
-              className="border border-[var(--workspace-border)] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-muted)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)] disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Save
-            </button>
-          </div>
-        </div>
-        <textarea
-          ref={memoryTextareaRef}
-          value={memoryDraft}
-          onChange={(event) => onMemoryDraftChange(event.target.value)}
-          onBlur={() => {
-            if (isMemoryDirty) {
-              onSaveMemory();
-            }
-          }}
-          spellCheck
-          className={clsx(
-            "min-h-28 w-full resize-y overflow-auto border border-[var(--workspace-border-subtle)] bg-[color-mix(in_srgb,var(--workspace-surface)_70%,black)] px-3 py-3 font-mono text-xs leading-5 text-[var(--workspace-text)] outline-none transition focus:border-[var(--workspace-accent)]",
-            isMemoryExpanded
-              ? "h-[min(52vh,34rem)] max-h-[min(70vh,48rem)]"
-              : "h-32 max-h-[min(45vh,28rem)]",
-          )}
-        />
-        {memorySaveError ? (
-          <p className="mt-2 text-xs leading-5 text-[var(--workspace-danger)]">
-            {memorySaveError}
-          </p>
-        ) : null}
-      </div>
-      </div>
-      {showHistoryPanel ? (
-        <div
-          ref={historyRef}
-          onScroll={(event) => {
-            const container = event.currentTarget;
-            const distanceFromBottom =
-              container.scrollHeight - container.scrollTop - container.clientHeight;
-            shouldStickHistoryToBottomRef.current = distanceFromBottom <= 40;
-          }}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain border-b border-[var(--workspace-border-subtle)] px-5 py-4 [touch-action:pan-y]"
-        >
-          <div className="space-y-4">
-            {messages.map((message) => {
-              const metadata =
-                message.role === "assistant"
-                  ? readWorkspaceKnowledgeMessageMetadata(message)
-                  : null;
-              const actionPlan =
-                message.role === "assistant" ? readWorkspaceActionPlan(message) : null;
-              const isUser = message.role === "user";
-              const isApplyingPlan = applyingPlanMessageIds.has(message._id as string);
-              const actionPreviewLines =
-                actionPlan && actionPlan.preview.length > 0
-                  ? actionPlan.preview
-                  : (actionPlan?.operations ?? []).map(
-                      (operation) => operation.description || operation.text || "Proposed change",
-                    );
-
-              return (
-                <div
-                  key={message._id}
-                  className={clsx(
-                    "flex min-w-0",
-                    isUser ? "justify-end" : "justify-start",
-                  )}
-                >
-                  <div
-                    className={clsx(
-                      "min-w-0 max-w-[min(48rem,100%)] border px-4 py-3",
-                      isUser
-                        ? "border-[var(--workspace-brand)] bg-[color-mix(in_srgb,var(--workspace-brand)_14%,transparent)]"
-                        : "border-[var(--workspace-border-subtle)] bg-[var(--workspace-surface-muted)]",
-                    )}
-                  >
-                    <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-accent)]">
-                      {isUser ? "You" : "AI"}
-                    </p>
-                    <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-[var(--workspace-text)] [overflow-wrap:anywhere]">
-                      {message.text}
-                    </p>
-                    {!isUser && actionPlan ? (
-                      <div className="mt-4 border border-[var(--workspace-border-subtle)] bg-[color-mix(in_srgb,var(--workspace-brand)_8%,transparent)] px-3 py-3">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-accent)]">
-                            Proposed Action
-                          </p>
-                          {message.status === "applied" ? (
-                            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                              Applied
-                            </span>
-                          ) : message.status === "error" ? (
-                            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-danger)]">
-                              Error
-                            </span>
-                          ) : actionPlan.operations.length === 0 ? (
-                            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                              No Changes
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => onApplyPlan(message._id)}
-                              disabled={isApplyingPlan || message.status !== "pending_approval"}
-                              className="border border-[var(--workspace-brand)] bg-[var(--workspace-brand)] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-inverse-text)] transition hover:bg-[var(--workspace-brand-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              {isApplyingPlan ? "Applying…" : "Apply"}
-                            </button>
-                          )}
-                        </div>
-                        {actionPreviewLines.length > 0 ? (
-                          <ul className="mt-3 space-y-2 text-sm leading-6 text-[var(--workspace-text)]">
-                            {actionPreviewLines.map((line, index) => (
-                              <li key={`${message._id}-preview-${index}`} className="[overflow-wrap:anywhere]">
-                                {line}
-                              </li>
-                            ))}
-                          </ul>
-                        ) : null}
-                        {message.status === "error" ? (
-                          <p className="mt-3 text-sm leading-6 text-[var(--workspace-danger)]">
-                            {message.error || "Could not apply the proposed changes."}
-                          </p>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {!isUser && metadata ? (
-                      <div className="mt-4 flex min-w-0 items-center justify-between gap-3 border-t border-[var(--workspace-border-subtle)] pt-3 text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                          <span className="min-w-0 shrink-0">{metadata.model}</span>
-                          <span className="min-w-0 text-right [overflow-wrap:anywhere]">
-                            {metadata.error
-                              ? "OpenAI issue surfaced"
-                              : metadata.sources.length > 0
-                                ? `Grounded with ${metadata.sources.length} source${metadata.sources.length === 1 ? "" : "s"}`
-                                : "Grounded with semantic context"}
-                          </span>
-                        </div>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
-            {isLoading ? (
-              <div className="flex justify-start">
-                <div className="border border-[var(--workspace-border-subtle)] bg-[var(--workspace-surface-muted)] px-4 py-3">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-accent)]">
-                    AI
-                  </p>
-                  <p className="mt-2 text-sm text-[var(--workspace-text-subtle)]">
-                    Thinking…
-                  </p>
-                </div>
-              </div>
-            ) : null}
-            {error ? (
-              <div className="border border-[var(--workspace-danger)]/40 bg-[color-mix(in_srgb,var(--workspace-danger)_10%,transparent)] px-4 py-3 text-sm text-[var(--workspace-text)]">
-                <div className="flex items-start justify-between gap-3">
-                  <p className="whitespace-pre-wrap leading-6">{error}</p>
-                  <button
-                    type="button"
-                    onClick={onClearError}
-                    className="border border-[var(--workspace-border-control)] px-2 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition hover:border-[var(--workspace-accent)] hover:text-[var(--workspace-text)]"
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              </div>
-            ) : null}
-            <div ref={historyEndRef} aria-hidden="true" className="h-px w-full" />
-          </div>
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 items-center justify-center px-5 py-8 text-sm text-[var(--workspace-text-subtle)]">
-          Start a persistent workspace conversation.
-        </div>
-      )}
-      <div className="relative shrink-0 border-t border-[var(--workspace-border-subtle)] bg-[var(--workspace-surface-muted)] px-5 pb-[calc(env(safe-area-inset-bottom,0px)+1.25rem)] pt-4 sm:pb-[calc(env(safe-area-inset-bottom,0px)+1rem)]">
-        {isLoading ? (
-          <div className="mb-3 flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-            <span>AI is responding…</span>
-            <span className="text-[var(--workspace-accent)]">Grounding context</span>
-          </div>
-        ) : null}
-        <div className="flex items-end gap-3">
-        <div className="min-w-0 flex-1">
-          <textarea
-            id={WORKSPACE_AI_CHAT_TEXTAREA_ID}
-            ref={textareaRef}
-            value={draft}
-            onChange={(event) => {
-              if (error) {
-                onClearError();
-              }
-              onDraftChange(event.target.value);
-              setCaretPosition(event.target.selectionStart ?? event.target.value.length);
-            }}
-            onFocus={(event) => {
-              setCaretPosition(event.target.selectionStart ?? event.target.value.length);
-            }}
-            onSelect={(event) => {
-              setCaretPosition(
-                event.currentTarget.selectionStart ?? event.currentTarget.value.length,
-              );
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask AI…"
-            rows={1}
-            disabled={isLoading}
-            className="w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[15px] leading-6 outline-none"
-          />
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            shouldStickHistoryToBottomRef.current = true;
-            onSubmit();
-          }}
-          disabled={isLoading || draft.trim().length === 0}
-          className={clsx(
-            "border border-[var(--workspace-brand)] bg-[var(--workspace-brand)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--workspace-inverse-text)] transition",
-            isLoading
-              ? "cursor-wait opacity-60"
-              : draft.trim().length === 0
-                ? "cursor-not-allowed opacity-60"
-                : "hover:bg-[var(--workspace-brand-hover)]",
-          )}
-        >
-          {isLoading ? "Thinking…" : "Ask AI"}
-        </button>
-        {autocompleteToken ? (
-          <LinkAutocompleteMenu
-            anchorRef={textareaRef}
-            suggestions={autocompleteSuggestions}
-            highlightIndex={activeLinkHighlightIndex}
-            onHover={setLinkHighlightIndex}
-            onSelect={applyLinkSuggestion}
-            emptyMessage={
-              activeLinkToken
-                ? "No matching pages or nodes."
-                : "No matching tags."
-            }
-            isLoading={activeLinkToken ? isLinkSearchLoading : isTagsAutocompleteLoading}
-          />
-        ) : null}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function OutlineNodeEditor({

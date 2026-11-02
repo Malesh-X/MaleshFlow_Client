@@ -16,16 +16,18 @@ export type WorkspacePaletteMode =
   | "taskSchedule"
   | "noteDate";
 
-export type WorkspacePanelLocation =
-  | { kind: "aiChat" }
-  | {
-      kind: "palette";
-      mode: WorkspacePaletteMode;
-      nodeId: string | null;
-    };
+export type WorkspacePanelLocation = {
+  kind: "palette";
+  mode: WorkspacePaletteMode;
+  nodeId: string | null;
+};
 
 export const WORKSPACE_PANEL_SEARCH_PARAM = "panel";
 export const WORKSPACE_PANEL_NODE_SEARCH_PARAM = "panelNode";
+
+// Panels that no longer exist. Old bookmarks and history entries may still
+// carry them; they open the underlying page instead.
+const RETIRED_PANEL_SLUGS = new Set(["ai-chat"]);
 
 const PALETTE_PANEL_SLUG_BY_MODE: Record<WorkspacePaletteMode, string> = {
   pages: "pages",
@@ -57,10 +59,6 @@ export function readWorkspacePanelLocation(
   searchParams: Pick<URLSearchParams, "get">,
 ): WorkspacePanelLocation | null {
   const panel = searchParams.get(WORKSPACE_PANEL_SEARCH_PARAM)?.trim() ?? "";
-  if (panel === "ai-chat") {
-    return { kind: "aiChat" };
-  }
-
   const mode = PALETTE_MODE_BY_PANEL_SLUG.get(panel) ?? null;
   if (!mode) {
     return null;
@@ -84,12 +82,6 @@ export function writeWorkspacePanelLocation(
     return;
   }
 
-  if (location.kind === "aiChat") {
-    searchParams.set(WORKSPACE_PANEL_SEARCH_PARAM, "ai-chat");
-    searchParams.delete(WORKSPACE_PANEL_NODE_SEARCH_PARAM);
-    return;
-  }
-
   searchParams.set(
     WORKSPACE_PANEL_SEARCH_PARAM,
     PALETTE_PANEL_SLUG_BY_MODE[location.mode],
@@ -99,4 +91,17 @@ export function writeWorkspacePanelLocation(
   } else {
     searchParams.delete(WORKSPACE_PANEL_NODE_SEARCH_PARAM);
   }
+}
+
+// Removes a retired panel (and its node param) from the search params, leaving
+// the page, focused node and anything else in place. Returns whether it did.
+export function clearRetiredWorkspacePanel(searchParams: URLSearchParams) {
+  const panel = searchParams.get(WORKSPACE_PANEL_SEARCH_PARAM)?.trim() ?? "";
+  if (!RETIRED_PANEL_SLUGS.has(panel)) {
+    return false;
+  }
+
+  searchParams.delete(WORKSPACE_PANEL_SEARCH_PARAM);
+  searchParams.delete(WORKSPACE_PANEL_NODE_SEARCH_PARAM);
+  return true;
 }

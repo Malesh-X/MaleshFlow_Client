@@ -13,6 +13,7 @@ import {
   splitFindQuerySegments,
 } from "../lib/domain/workspaceUi";
 import {
+  clearRetiredWorkspacePanel,
   readWorkspacePanelLocation,
   writeWorkspacePanelLocation,
 } from "../lib/domain/workspaceLocation";
@@ -47,12 +48,23 @@ test("workspace panel locations round-trip without losing the page", () => {
     nodeId: null,
   });
 
-  writeWorkspacePanelLocation(searchParams, { kind: "aiChat" });
-  assert.deepEqual(readWorkspacePanelLocation(searchParams), { kind: "aiChat" });
-  assert.equal(searchParams.get("panelNode"), null);
-
   writeWorkspacePanelLocation(searchParams, null);
   assert.equal(searchParams.toString(), "page=page_123");
+});
+
+test("a retired AI Chat URL opens the underlying page and keeps other params", () => {
+  const searchParams = new URLSearchParams(
+    "page=page_123&zoom=node_456&panel=ai-chat&panelNode=node_789&utm=keep",
+  );
+  assert.equal(readWorkspacePanelLocation(searchParams), null);
+  assert.equal(clearRetiredWorkspacePanel(searchParams), true);
+  assert.equal(searchParams.toString(), "page=page_123&zoom=node_456&utm=keep");
+  assert.equal(readWorkspacePanelLocation(searchParams), null);
+
+  // Nothing to clear on a normal or palette URL.
+  const palette = new URLSearchParams("page=page_123&panel=find&panelNode=node_1");
+  assert.equal(clearRetiredWorkspacePanel(palette), false);
+  assert.equal(palette.toString(), "page=page_123&panel=find&panelNode=node_1");
 });
 
 test("unknown workspace panel locations are ignored", () => {
