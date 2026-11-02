@@ -58,10 +58,11 @@ test("today mode without a workspace zone falls back to UTC (Nov 3)", async () =
   expect(zonedCalendarDate(await dueAt(), "UTC")).toEqual({ year: 2026, month: 11, day: 3 });
 });
 
-test("dueDate mode advances from the due date in the workspace zone", async () => {
+test("dueDate mode keeps the cadence and skips past days in the workspace zone", async () => {
   const { t, nodeId, dueAt } = await recurringTask(HNL);
   await t.mutation(api.workspace.completeTaskPageTask, { ownerKey, nodeId, completionMode: "dueDate" });
-  expect(await dueAt()).toBe(zonedNoon({ year: 2026, month: 10, day: 31 }, HNL));
+  // Due Oct 30, daily, completed on Nov 1 in Honolulu: Oct 31 and Nov 1 are past.
+  expect(await dueAt()).toBe(zonedNoon({ year: 2026, month: 11, day: 2 }, HNL));
 });
 
 test("just after midnight Honolulu, today mode moves to the next day", async () => {

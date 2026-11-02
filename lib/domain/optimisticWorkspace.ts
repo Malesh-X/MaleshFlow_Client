@@ -977,6 +977,7 @@ export function applyOptimisticNodeCompletion(
         dueEndAt: node.dueEndAt ?? null,
         frequency: recurrenceFrequency,
         mode: args.completionMode,
+        skipPast: true,
       });
       return applyNodeUpdatePatch(node, { taskStatus: "todo", dueAt: nextRange.dueAt, dueEndAt: nextRange.dueEndAt });
     }

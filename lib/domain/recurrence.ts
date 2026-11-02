@@ -278,6 +278,10 @@ export function getCompactRecurrenceLabel(frequency: RecurrenceFrequency) {
   return `${parsedFrequency.interval}${unitLabel}`;
 }
 
+function calendarKey(date: CalendarDate) {
+  return date.year * 10_000 + date.month * 100 + date.day;
+}
+
 function recurrenceStep(frequency: Exclude<RecurrenceFrequency, null>): { unit: RecurrenceUnit; amount: number } {
   if (isRecurrencePreset(frequency)) {
     return {
@@ -294,26 +298,49 @@ function recurrenceStep(frequency: Exclude<RecurrenceFrequency, null>): { unit: 
 // from the current due date, "today" from today. Pass `timeZone` (the item's
 // zone, else the workspace zone) so the browser and the UTC server agree;
 // without it the runtime's local zone is used.
+//
+// `skipPast` (completions pass it): in "dueDate" mode an overdue item keeps
+// its cadence but skips occurrences that are already past, landing on the
+// first one after today (due Oct 20 every 4 days, completed Nov 1 -> Nov 5).
+// Without it, "dueDate" mode ignores the clock and adds one step.
 export function advanceRecurringDueDate(args: {
   dueAt: number;
   frequency: Exclude<RecurrenceFrequency, null>;
   mode: RecurringCompletionMode;
   now?: Date;
   timeZone?: string | null;
+  skipPast?: boolean;
 }) {
   const step = recurrenceStep(args.frequency);
   if (args.timeZone) {
-    const base: CalendarDate = zonedCalendarDate(
-      args.mode === "today" ? (args.now ?? new Date()).getTime() : args.dueAt,
-      args.timeZone,
-    );
-    return zonedNoon(addCalendarUnits(base, step.unit, step.amount), args.timeZone);
+    const timeZone = args.timeZone;
+    const nowMs = (args.now ?? new Date()).getTime();
+    const base: CalendarDate = zonedCalendarDate(args.mode === "today" ? nowMs : args.dueAt, timeZone);
+    if (args.mode === "dueDate" && args.skipPast) {
+      const today = zonedCalendarDate(nowMs, timeZone);
+      const todayKey = calendarKey(today);
+      // Multiples of the step from the original date, so month-end dates don't drift.
+      for (let count = 1; count <= 100_000; count += 1) {
+        const next = addCalendarUnits(base, step.unit, step.amount * count);
+        if (calendarKey(next) > todayKey) return zonedNoon(next, timeZone);
+      }
+    }
+    return zonedNoon(addCalendarUnits(base, step.unit, step.amount), timeZone);
   }
 
   const baseDate =
     args.mode === "today"
       ? getTodayReferenceDate(args.now)
       : toLocalNoon(new Date(args.dueAt));
+  if (args.mode === "dueDate" && args.skipPast) {
+    const base = { year: baseDate.getFullYear(), month: baseDate.getMonth() + 1, day: baseDate.getDate() };
+    const nowDate = args.now ?? new Date();
+    const todayKey = calendarKey({ year: nowDate.getFullYear(), month: nowDate.getMonth() + 1, day: nowDate.getDate() });
+    for (let count = 1; count <= 100_000; count += 1) {
+      const next = addCalendarUnits(base, step.unit, step.amount * count);
+      if (calendarKey(next) > todayKey) return new Date(next.year, next.month - 1, next.day, 12).getTime();
+    }
+  }
   const nextDate = new Date(baseDate);
   switch (step.unit) {
     case "day":
@@ -340,6 +367,7 @@ export function advanceRecurringDueDateRange(args: {
   mode: RecurringCompletionMode;
   now?: Date;
   timeZone?: string | null;
+  skipPast?: boolean;
 }) {
   const nextDueAt = advanceRecurringDueDate({
     dueAt: args.dueAt,
@@ -347,6 +375,7 @@ export function advanceRecurringDueDateRange(args: {
     mode: args.mode,
     now: args.now,
     timeZone: args.timeZone,
+    skipPast: args.skipPast,
   });
 
   if (!args.dueEndAt || args.dueEndAt <= args.dueAt) {

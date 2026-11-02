@@ -3850,7 +3850,7 @@ function readStoredStringSet(key: string) {
   }
 }
 
-function readStoredRecurringCompletionMode(defaultValue: RecurringCompletionMode) {
+function readStoredRecurringCompletionMode<T extends RecurringCompletionMode | null>(defaultValue: T): RecurringCompletionMode | T {
   if (typeof window === "undefined") {
     return defaultValue;
   }
@@ -4482,17 +4482,22 @@ function ConfiguredWorkspace({
     }
     workspaceSettingsMigratedRef.current = true;
     const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const storedCompletionMode = readStoredRecurringCompletionMode("dueDate");
+    // Only a mode this browser actually stored is migrated; a browser with
+    // nothing stored uses the default without saving it, so it can't
+    // overwrite another device's choice before that device migrates.
+    const storedCompletionMode = readStoredRecurringCompletionMode(null);
     if (workspaceSettings.completionMode) {
       setRecurringCompletionMode(workspaceSettings.completionMode);
     } else {
-      setRecurringCompletionMode(storedCompletionMode);
+      setRecurringCompletionMode(storedCompletionMode ?? "dueDate");
     }
-    if (!workspaceSettings.timeZone || !workspaceSettings.completionMode) {
+    const migrateTimeZone = !workspaceSettings.timeZone && !!browserTimeZone;
+    const migrateCompletionMode = !workspaceSettings.completionMode && storedCompletionMode !== null;
+    if (migrateTimeZone || migrateCompletionMode) {
       void setWorkspaceSettings({
         ownerKey,
-        ...(!workspaceSettings.timeZone && browserTimeZone ? { timeZone: browserTimeZone } : {}),
-        ...(!workspaceSettings.completionMode ? { completionMode: storedCompletionMode } : {}),
+        ...(migrateTimeZone ? { timeZone: browserTimeZone } : {}),
+        ...(migrateCompletionMode ? { completionMode: storedCompletionMode } : {}),
       });
     }
   }, [ownerKey, setWorkspaceSettings, workspaceSettings]);

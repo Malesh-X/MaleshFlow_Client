@@ -535,6 +535,7 @@ async function syncPlannerLinkedSourceTaskCompletion(
         frequency: recurrenceFrequency,
         mode: completionMode,
         timeZone: await workspaceTimeZoneFor(ctx.db, sourceTask),
+        skipPast: true,
       });
       const nextSourceMeta = withNextSourceOccurrence(sourceTask.sourceMeta);
       await ctx.db.patch(sourceTask._id, {

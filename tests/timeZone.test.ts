@@ -96,3 +96,17 @@ test("resolveTimeZone prefers the item's zone, then the workspace zone", () => {
   assert.equal(resolveTimeZone("Not/AZone", null), null);
   assert.equal(isValidTimeZone("Not/AZone"), false);
 });
+
+test("completions in due-date mode skip occurrences that are already past", () => {
+  const now = new Date("2026-11-02T20:00:00Z"); // 10 a.m. Nov 2 in Honolulu
+  const at = (month: number, day: number) => zonedNoon({ year: 2026, month, day }, HNL);
+  const next = (dueAt: number, frequency: Parameters<typeof advanceRecurringDueDate>[0]["frequency"]) =>
+    advanceRecurringDueDate({ dueAt, frequency, mode: "dueDate", now, timeZone: HNL, skipPast: true });
+  assert.equal(next(at(10, 20), { interval: 4, unit: "day" }), at(11, 5));
+  assert.equal(next(at(11, 2), "daily"), at(11, 3)); // due today: one step
+  assert.equal(next(at(11, 1), "daily"), at(11, 3)); // never lands on today
+  assert.equal(next(at(11, 9), "weekly"), at(11, 16)); // future: one step
+  assert.equal(next(at(1, 15), "monthly"), at(11, 15)); // steps from the original date
+  // Without skipPast, due-date mode still ignores the clock.
+  assert.equal(advanceRecurringDueDate({ dueAt: at(10, 20), frequency: { interval: 4, unit: "day" }, mode: "dueDate", now, timeZone: HNL }), at(10, 24));
+});

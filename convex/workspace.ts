@@ -5462,6 +5462,7 @@ async function completeTaskPageTaskCore(
         frequency: recurrenceFrequency,
         mode: completionMode,
         timeZone: await workspaceTimeZoneFor(ctx.db, node),
+        skipPast: true,
       });
       nextPatch.taskStatus = "todo";
       nextPatch.dueAt = nextRange.dueAt;
@@ -5671,6 +5672,7 @@ async function runNodeCompletion(ctx: MutationCtx, args: CompletionArgs) {
       frequency,
       mode: args.completionMode,
       timeZone: await workspaceTimeZoneFor(ctx.db, node),
+      skipPast: true,
     });
     await ctx.db.patch(node._id, {
       taskStatus: "todo",
