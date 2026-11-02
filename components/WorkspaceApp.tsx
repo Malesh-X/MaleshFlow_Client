@@ -2442,7 +2442,7 @@ function buildNodeClipboardLink(node: Pick<Doc<"nodes">, "_id">) {
   if (isOptimisticNodeId(node._id as string)) {
     return null;
   }
-  return `[[node:${node._id}]]`;
+  return `[[node:${node._id}?hidetags]]`;
 }
 
 function buildPageLinkInsertText(page: Pick<Doc<"pages">, "_id" | "title">) {
