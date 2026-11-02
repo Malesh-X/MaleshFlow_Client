@@ -126,16 +126,13 @@ export type OptimisticInsertNodeAboveArgs = {
   shiftedTaskStatus?: NodeTaskStatus;
 };
 
-export type OptimisticPlannerTaskCompletionArgs = {
-  ownerKey: string;
-  plannerNodeId: Id<"nodes">;
-  completionMode: "dueDate" | "today";
-};
-
-export type OptimisticTaskPageTaskCompletionArgs = {
+export type OptimisticNodeCompletionArgs = {
   ownerKey: string;
   nodeId: Id<"nodes">;
+  intent: "complete" | "reopen";
   completionMode: "dueDate" | "today";
+  expectedRevision: number;
+  plannerPageId?: Id<"pages">;
 };
 
 function getTimestamp() {
@@ -955,55 +952,35 @@ export function applyOptimisticInsertNodeAbove(
   );
 }
 
-export function applyOptimisticPlannerTaskCompletion(
+// Optimistic view of workspace:setNodeCompletion: show the item in the state
+// the caller asked for. The server's routing (Past Weeks, Done, roll-forward
+// in the workspace zone) replaces this when the result arrives.
+export function applyOptimisticNodeCompletion(
   localStore: OptimisticLocalStore,
-  args: OptimisticPlannerTaskCompletionArgs,
+  args: OptimisticNodeCompletionArgs,
 ) {
-  patchNodeInWorkspaceQueries(localStore, args.ownerKey, args.plannerNodeId, (node) =>
-    applyNodeUpdatePatch(node, {
-      taskStatus: node.kind === "task" ? "done" : undefined,
-      noteCompleted: node.kind === "note" ? true : undefined,
-    }),
-  );
-}
-
-export function applyOptimisticTaskPageTaskCompletion(
-  localStore: OptimisticLocalStore,
-  args: OptimisticTaskPageTaskCompletionArgs,
-) {
+  if (args.plannerPageId) {
+    // A planner preview completes the planner's copy, not this node.
+    return;
+  }
   patchNodeInWorkspaceQueries(localStore, args.ownerKey, args.nodeId, (node) => {
+    const complete = args.intent === "complete";
     if (node.kind !== "task") {
-      return node;
+      return applyNodeUpdatePatch(node, { noteCompleted: complete });
     }
-
-    const recurrenceFrequency = parseRecurrenceFrequency(
-      getSourceMeta(node).recurrenceFrequency,
-    );
-    if (recurrenceFrequency && node.dueAt) {
-      if (node.taskStatus === "done") {
-        return applyNodeUpdatePatch(node, {
-          taskStatus: "todo",
-          dueAt: node.dueAt,
-          dueEndAt: node.dueEndAt ?? null,
-        });
-      }
-
+    const recurrenceFrequency = parseRecurrenceFrequency(getSourceMeta(node).recurrenceFrequency);
+    // A planner copy is marked done; the server rolls its source forward.
+    const isPlannerCopy = getSourceMeta(node).plannerKind === "plannerLinkedTask";
+    if (complete && recurrenceFrequency && node.dueAt && !isPlannerCopy) {
       const nextRange = advanceRecurringDueDateRange({
         dueAt: node.dueAt,
         dueEndAt: node.dueEndAt ?? null,
         frequency: recurrenceFrequency,
         mode: args.completionMode,
       });
-      return applyNodeUpdatePatch(node, {
-        taskStatus: "todo",
-        dueAt: nextRange.dueAt,
-        dueEndAt: nextRange.dueEndAt,
-      });
+      return applyNodeUpdatePatch(node, { taskStatus: "todo", dueAt: nextRange.dueAt, dueEndAt: nextRange.dueEndAt });
     }
-
-    return applyNodeUpdatePatch(node, {
-      taskStatus: node.taskStatus === "done" ? "todo" : "done",
-    });
+    return applyNodeUpdatePatch(node, { taskStatus: complete ? "done" : "todo" });
   });
 }
 

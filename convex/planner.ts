@@ -843,6 +843,8 @@ export const completePlannerTask = mutation({
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "planner:completePlannerTask");
+    // Legacy adapter: old open tabs still call this; new code uses workspace:setNodeCompletion.
+    console.log("[legacy completion] planner:completePlannerTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     await assertNodeEditable(ctx, args.plannerNodeId, "status");
     return await completePlannerLinkedTask(ctx, {
@@ -868,6 +870,7 @@ const plannerCompletionReceiptValidator = v.object({
       taskStatus: taskStatusValidator,
       dueAt: v.union(v.number(), v.null()),
       dueEndAt: v.union(v.number(), v.null()),
+      occurrenceIndex: v.optional(v.union(v.number(), v.null())),
     }),
   ),
   appendedPlannerNodeIds: v.array(v.string()),
@@ -957,6 +960,9 @@ export const undoCompletePlannerTask = mutation({
         taskStatus: entry.taskStatus,
         dueAt: entry.dueAt,
         dueEndAt: entry.dueEndAt,
+        ...(typeof entry.occurrenceIndex === "number"
+          ? { sourceMeta: { ...getNodeSourceMeta(node), occurrenceIndex: entry.occurrenceIndex } }
+          : {}),
         updatedAt: now,
       });
       touchedPageIds.add(node.pageId as string);
@@ -1009,6 +1015,8 @@ export const completePlannerSourceTask = mutation({
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "planner:completePlannerSourceTask");
+    // Legacy adapter: old open tabs still call this; new code uses workspace:setNodeCompletion.
+    console.log("[legacy completion] planner:completePlannerSourceTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     await assertPageWritable(ctx, args.plannerPageId);
     await assertNodeEditable(ctx, args.sourceTaskNodeId, "status");

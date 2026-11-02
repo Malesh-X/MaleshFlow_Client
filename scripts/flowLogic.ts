@@ -31,6 +31,7 @@ export type TreeNode = {
   dueTime?: string | null;
   dueTimeZone?: string | null;
   sourceMeta?: Record<string, unknown> | null;
+  revision?: number;
 };
 
 export type PageDoc = { _id: string; title: string; archived?: boolean; sourceMeta?: Record<string, unknown> | null };

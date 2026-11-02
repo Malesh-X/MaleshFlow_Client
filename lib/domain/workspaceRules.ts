@@ -129,3 +129,42 @@ export function kindChangeArgs(node: { kind: string }, kind: "task" | "note") {
     recurrenceFrequency: null,
   };
 }
+
+// The completion-relevant state of an item, as setNodeCompletion reports it.
+export type CompletionState = {
+  revision: number;
+  kind: string;
+  taskStatus: string | null;
+  noteCompleted: boolean;
+  dueAt: number | null;
+  dueEndAt: number | null;
+  archived?: boolean;
+};
+
+type CompletionSource = {
+  kind: string;
+  taskStatus?: string | null;
+  sourceMeta?: unknown;
+  dueAt?: number | null;
+  dueEndAt?: number | null;
+};
+
+// setNodeCompletion refuses a request made against an old revision. A text
+// edit also bumps the revision, so a caller whose view of the item still
+// matches the server's on everything completion depends on (kind, status,
+// dates) may retry with the server's revision. A completion made elsewhere
+// changes one of those fields, so it never matches and is never repeated.
+export function completionStateMatches(seen: CompletionSource, current: CompletionState) {
+  if (current.archived) return false;
+  return (
+    seen.kind === current.kind &&
+    (seen.kind === "task" ? (seen.taskStatus ?? "todo") === (current.taskStatus ?? "todo") : true) &&
+    (getNodeMeta(seen).noteCompleted === true) === current.noteCompleted &&
+    (seen.dueAt ?? null) === current.dueAt &&
+    (seen.dueEndAt ?? null) === current.dueEndAt
+  );
+}
+
+export function completionIntentFor(node: { kind: string; taskStatus?: string | null; sourceMeta?: unknown }) {
+  return isNodeCompleted(node) ? ("reopen" as const) : ("complete" as const);
+}

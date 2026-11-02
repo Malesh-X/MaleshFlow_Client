@@ -114,6 +114,9 @@ export type HistoryEntry =
       // the task-page (archive-to-Done) flow. Undo always reverses via the
       // receipt, which both flows produce in the same shape.
       redoTarget:
+        // Completions made through workspace:setNodeCompletion redo the same way.
+        | { kind: "completion"; nodeId: Id<"nodes">; plannerPageId?: Id<"pages"> }
+        // Entries from before setNodeCompletion (still in an open tab's stack).
         | { kind: "plannerNode"; plannerNodeId: Id<"nodes"> }
         | { kind: "taskPage"; nodeId: Id<"nodes"> }
         | { kind: "forceArchive"; nodeId: Id<"nodes"> };
@@ -172,16 +175,13 @@ type SetNodeTreesArchivedBatchFn = (args: {
   archived: boolean;
 }) => Promise<unknown>;
 
-type CompletePlannerTaskFn = (args: {
-  ownerKey: string;
-  plannerNodeId: Id<"nodes">;
-  completionMode: "dueDate" | "today";
-}) => Promise<unknown>;
-
-type CompleteTaskPageTaskFn = (args: {
+type SetNodeCompletionFn = (args: {
   ownerKey: string;
   nodeId: Id<"nodes">;
+  intent: "complete" | "reopen";
   completionMode: "dueDate" | "today";
+  expectedRevision: number;
+  plannerPageId?: Id<"pages">;
 }) => Promise<unknown>;
 
 type ForceArchiveTaskPageItemFn = (args: {
@@ -204,8 +204,9 @@ type UseWorkspaceHistoryArgs = {
   moveNode: MoveNodeFn;
   setNodeTreeArchived: SetNodeTreeArchivedFn;
   setNodeTreesArchivedBatch: SetNodeTreesArchivedBatchFn;
-  completePlannerTask: CompletePlannerTaskFn;
-  completeTaskPageTask: CompleteTaskPageTaskFn;
+  setNodeCompletion: SetNodeCompletionFn;
+  // Current revision of a loaded node (redo passes it to setNodeCompletion).
+  getNodeRevision: (nodeId: Id<"nodes">) => number;
   forceArchiveTaskPageItem: ForceArchiveTaskPageItemFn;
   undoCompletePlannerTask: UndoCompletePlannerTaskFn;
   isDisabled?: boolean;
@@ -326,8 +327,8 @@ export function useWorkspaceHistoryController({
   moveNode,
   setNodeTreeArchived,
   setNodeTreesArchivedBatch,
-  completePlannerTask,
-  completeTaskPageTask,
+  setNodeCompletion,
+  getNodeRevision,
   forceArchiveTaskPageItem,
   undoCompletePlannerTask,
   isDisabled = false,
@@ -743,23 +744,31 @@ export function useWorkspaceHistoryController({
           if (isUndo) {
             await undoCompletePlannerTask({ ownerKey, receipt: entry.receipt });
           } else {
+            const target = entry.redoTarget;
+            const completionNodeId =
+              target.kind === "completion"
+                ? target.nodeId
+                : target.kind === "plannerNode"
+                  ? target.plannerNodeId
+                  : target.kind === "taskPage"
+                    ? target.nodeId
+                    : null;
             const redoResult =
-              entry.redoTarget.kind === "plannerNode"
-                ? await completePlannerTask({
+              completionNodeId !== null
+                ? await setNodeCompletion({
                     ownerKey,
-                    plannerNodeId: entry.redoTarget.plannerNodeId,
+                    nodeId: completionNodeId,
+                    intent: "complete",
                     completionMode: entry.completionMode,
+                    expectedRevision: getNodeRevision(completionNodeId),
+                    ...(target.kind === "completion" && target.plannerPageId
+                      ? { plannerPageId: target.plannerPageId }
+                      : {}),
                   })
-                : entry.redoTarget.kind === "forceArchive"
-                  ? await forceArchiveTaskPageItem({
-                      ownerKey,
-                      nodeId: entry.redoTarget.nodeId,
-                    })
-                  : await completeTaskPageTask({
-                      ownerKey,
-                      nodeId: entry.redoTarget.nodeId,
-                      completionMode: entry.completionMode,
-                    });
+                : await forceArchiveTaskPageItem({
+                    ownerKey,
+                    nodeId: (target as { nodeId: Id<"nodes"> }).nodeId,
+                  });
             // Entries move between the undo/redo stacks by reference, so
             // refreshing the receipt here keeps the next undo aligned with
             // what this redo actually did (new clone ids, fresh syncs). The
@@ -816,8 +825,8 @@ export function useWorkspaceHistoryController({
       }
     },
     [
-      completePlannerTask,
-      completeTaskPageTask,
+      setNodeCompletion,
+      getNodeRevision,
       ensureDraftSession,
       forceArchiveTaskPageItem,
       moveNode,

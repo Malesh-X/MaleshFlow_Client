@@ -436,6 +436,8 @@ export type PlannerCompletionPatchedSourceTask = {
   taskStatus: TaskStatus | null;
   dueAt: number | null;
   dueEndAt: number | null;
+  // Before-state of the occurrence index (absent on old receipts).
+  occurrenceIndex?: number | null;
 };
 
 export type PlannerCompletionDeletedFavorite = {
@@ -470,4 +472,36 @@ export function plannerCompletionReceiptHasEffects(
     receipt.archivedRootNodeId !== null ||
     receipt.pastWeeksCloneRootNodeId !== null
   );
+}
+
+// ---- recurring occurrences ----
+// A recurring task's current occurrence is identified by an index that goes up
+// every time the server rolls the task forward (and goes back on undo). Each
+// planner copy stores the index of the occurrence it was made for; the server
+// advances the source only while that index is still current, so completing
+// two copies of one occurrence advances it once. The due date isn't part of
+// the token: rescheduling a task doesn't make its planner copies stale.
+
+function occurrenceMetaOf(sourceMeta: unknown) {
+  return sourceMeta && typeof sourceMeta === "object" ? (sourceMeta as Record<string, unknown>) : {};
+}
+
+export function getSourceOccurrenceIndex(sourceMeta: unknown) {
+  const value = occurrenceMetaOf(sourceMeta).occurrenceIndex;
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function sourceOccurrenceToken(source: { sourceMeta?: unknown }) {
+  return String(getSourceOccurrenceIndex(source.sourceMeta));
+}
+
+export function withNextSourceOccurrence(sourceMeta: unknown) {
+  const meta = occurrenceMetaOf(sourceMeta);
+  return { ...meta, occurrenceIndex: getSourceOccurrenceIndex(meta) + 1 };
+}
+
+// The token a planner copy was made for; null for copies made before tokens.
+export function getPlannerCopyOccurrenceToken(copy: { sourceMeta?: unknown }) {
+  const value = occurrenceMetaOf(copy.sourceMeta).sourceOccurrenceToken;
+  return typeof value === "string" && value.length > 0 ? value : null;
 }

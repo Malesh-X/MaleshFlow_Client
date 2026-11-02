@@ -82,19 +82,25 @@ locally, before anything connects.
 
 ### How `done` completes items
 
-`done` looks up the item's page and takes the same path as the app's checkbox:
+`done` calls `workspace:setNodeCompletion` with `intent: "complete"`, the
+completion mode (workspace setting, or `--mode`) and the item's revision as it
+was read. That is the same server function the app's checkbox and keyboard
+toggle call, and it routes the item the same way:
 
-| Item | Convex function | Effect |
-| --- | --- | --- |
-| Planner day or focus item (or a planner copy of a task) | `planner:completePlannerTask` | Marks it done; once the day's items are all done the day moves to Past Weeks and linked source tasks are completed. |
-| Root task on a task page with "archive completed tasks to Done" on | `workspace:completeTaskPageTask` | Moves it to the Done page (recurring tasks roll forward instead). |
-| Recurring task with a due date, anywhere else | `workspace:updateNode` | Stays open and moves to its next due date. |
-| Any other task | `workspace:updateNode` | `taskStatus: "done"`. |
+| Item | Effect |
+| --- | --- |
+| Planner day or focus item (or a planner copy of a task) | Marks it done; once the day's items are all done the day moves to Past Weeks and linked source tasks are completed. |
+| Root task on a task page with "archive completed tasks to Done" on | Moves it to the Done page (recurring tasks roll forward instead). |
+| Recurring task with a due date, anywhere else | Stays open and moves to its next due date, in the item's or the workspace's time zone. |
+| Any other task | `taskStatus: "done"`. |
+| Note | Marked completed. |
 
-The dry run prints which path it picked. `update --status done` takes the same
-path. An item that is already done (or already archived by a completion) is
-left alone and the CLI says so; neither command ever reopens a task. To reopen
-a plain task, use `update --status todo`.
+The CLI prints which path the server took. `update --status done` takes the
+same path. An item that is already done (or already archived by a completion)
+is left alone; neither command ever reopens a task. If the item changed between
+reading it and the write (another device completed it, say), nothing changes
+and the CLI says so; run `done` again. To reopen a plain task, use
+`update --status todo`.
 
 ### `doctor` checks
 

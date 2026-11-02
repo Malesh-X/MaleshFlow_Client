@@ -1,4 +1,10 @@
 import { workspaceTimeZoneFor } from "./workspaceSettings";
+import {
+  getPlannerCopyOccurrenceToken,
+  getSourceOccurrenceIndex,
+  sourceOccurrenceToken,
+  withNextSourceOccurrence,
+} from "../../lib/domain/planner";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { DatabaseReader, MutationCtx } from "../_generated/server";
 import {
@@ -463,6 +469,7 @@ function recordSourceTaskBeforeState(
     taskStatus: sourceTask.taskStatus ?? null,
     dueAt: sourceTask.dueAt ?? null,
     dueEndAt: sourceTask.dueEndAt ?? null,
+    occurrenceIndex: getSourceOccurrenceIndex(sourceTask.sourceMeta),
   });
 }
 
@@ -503,6 +510,23 @@ async function syncPlannerLinkedSourceTaskCompletion(
       continue;
     }
 
+    if (recurrenceFrequency && sourceTask.dueAt) {
+      const copyToken = getPlannerCopyOccurrenceToken(plannerNode);
+      if (copyToken === null) {
+        // Copies made before occurrence tokens: today's behavior, logged.
+        console.log("[legacy completion] planner copy without an occurrence token", plannerNode._id);
+      } else if (copyToken !== sourceOccurrenceToken(sourceTask)) {
+        // Another copy (or the source itself) already completed this
+        // occurrence: mark this copy synced without advancing the source again.
+        recordPlannerNodeBeforeState(receipt, plannerNode);
+        await ctx.db.patch(plannerNode._id, {
+          sourceMeta: buildPlannerLinkedSourceCompletionMeta({ plannerNode, sourceTask, now }),
+          updatedAt: now,
+        });
+        continue;
+      }
+    }
+
     recordSourceTaskBeforeState(receipt, sourceTask);
     if (recurrenceFrequency && sourceTask.dueAt) {
       const nextRange = advanceRecurringDueDateRange({
@@ -512,14 +536,17 @@ async function syncPlannerLinkedSourceTaskCompletion(
         mode: completionMode,
         timeZone: await workspaceTimeZoneFor(ctx.db, sourceTask),
       });
+      const nextSourceMeta = withNextSourceOccurrence(sourceTask.sourceMeta);
       await ctx.db.patch(sourceTask._id, {
         taskStatus: "todo",
         dueAt: nextRange.dueAt,
         dueEndAt: nextRange.dueEndAt,
+        sourceMeta: nextSourceMeta,
         updatedAt: now,
       });
       const appendedPlannerNodeId = await appendPlannerSidebarSourceTaskToMatchingDay(ctx, {
         ...sourceTask,
+        sourceMeta: nextSourceMeta,
         taskStatus: "todo",
         dueAt: nextRange.dueAt,
         dueEndAt: nextRange.dueEndAt,
@@ -986,6 +1013,10 @@ export async function appendPlannerLinkedTaskCopy(
     args.parentNodeId,
     args.afterNodeId,
   );
+  // The occurrence this copy is for. Set once here; refreshing a planner never
+  // changes an existing copy's token.
+  const storedSource = await ctx.db.get(args.sourceTask._id);
+  const occurrenceToken = sourceOccurrenceToken(storedSource ?? args.sourceTask);
   const nodeId = await ctx.db.insert("nodes", {
     pageId: args.plannerPageId,
     parentNodeId: args.parentNodeId,
@@ -1003,6 +1034,7 @@ export async function appendPlannerLinkedTaskCopy(
       plannerDate: args.plannerDate,
       sourceTaskNodeId: args.sourceTask._id,
       sourceTaskPageId: args.sourceTask.pageId,
+      sourceOccurrenceToken: occurrenceToken,
       taskKindLocked: true,
       recurrenceFrequency: null,
     },

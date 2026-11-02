@@ -63,7 +63,6 @@ import {
   type OutlineTreeNode,
 } from "@/lib/domain/outline";
 import {
-  advanceRecurringDueDateRange,
   areRecurrenceFrequenciesEqual,
   formatCompactDueDateRange,
   formatDueDateRange,
@@ -75,15 +74,17 @@ import {
   type RecurrenceFrequency,
   type RecurringCompletionMode,
 } from "@/lib/domain/recurrence";
-import { resolveTimeZone } from "@/lib/domain/timeZone";
 import {
   SIDEBAR_SECTIONS,
   getNodeMeta,
   getPageMeta,
   isNodeLocked,
-  isPlannerCompletionItem as sharedIsPlannerCompletionItem,
   isPlannerLinkedTaskCopy,
+  completionIntentFor,
+  completionStateMatches,
+  isNodeCompleted,
   pageTypeForSection,
+  type CompletionState,
   type PageType,
   type SidebarSection,
 } from "@/lib/domain/workspaceRules";
@@ -141,8 +142,7 @@ import {
   applyOptimisticNodeChildrenLinkAutocompleteHidden,
   applyOptimisticNodeDataDumpExcluded,
   applyOptimisticNodeMoves,
-  applyOptimisticPlannerTaskCompletion,
-  applyOptimisticTaskPageTaskCompletion,
+  applyOptimisticNodeCompletion,
   applyOptimisticNodeSplit,
   applyOptimisticNodeTreeArchive,
   applyOptimisticNodeUpdate,
@@ -761,12 +761,6 @@ type InsertNodeAboveArgs = Parameters<
   ReturnType<typeof useMutation<typeof api.workspace.insertNodeAbove>>
 >[0];
 type SplitNodeArgs = Parameters<ReturnType<typeof useMutation<typeof api.workspace.splitNode>>>[0];
-type CompleteTaskPageTaskArgs = Parameters<
-  ReturnType<typeof useMutation<typeof api.workspace.completeTaskPageTask>>
->[0];
-type CompletePlannerSourceTaskArgs = Parameters<
-  ReturnType<typeof useMutation<typeof api.planner.completePlannerSourceTask>>
->[0];
 type MoveNodeTreesToPageArgs = Parameters<
   ReturnType<typeof useMutation<typeof api.workspace.moveNodeTreesToPage>>
 >[0];
@@ -778,12 +772,6 @@ type InsertNodeAboveMutation = (args: InsertNodeAboveArgs) => Promise<{
 }>;
 type MoveNodeMutation = (args: MoveNodeArgs) => Promise<unknown>;
 type SplitNodeMutation = (args: SplitNodeArgs) => Promise<unknown>;
-type CompleteTaskPageTaskMutation = (args: CompleteTaskPageTaskArgs) => Promise<unknown>;
-type CompletePlannerSourceTaskMutation = (
-  args: CompletePlannerSourceTaskArgs,
-) => Promise<{
-  completedPlannerNodeId: Id<"nodes"> | null;
-}>;
 type ReplaceNodeAndInsertSiblingsMutation = ReturnType<
   typeof useMutation<typeof api.workspace.replaceNodeAndInsertSiblings>
 >;
@@ -881,6 +869,7 @@ type TreeNode = OutlineTreeNode<{
   dueTimeZone?: string | null;
   archived: boolean;
   sourceMeta?: Record<string, unknown> | null;
+  revision?: number;
 }>;
 type SchedulePaletteNode = {
   _id: string;
@@ -914,6 +903,33 @@ const NodeScheduleActionContext = createContext<{
 }>({
   openTaskSchedule: () => undefined,
   openNoteDate: () => undefined,
+});
+// workspace:setNodeCompletion, as the app calls it (see completeNode in
+// WorkspaceApp). Every checkbox and keyboard toggle goes through it.
+type NodeCompletionRoute = "none" | "planner" | "plannerPreview" | "taskPage" | "recurring" | "task" | "note";
+type NodeCompletionResult = {
+  status: "applied" | "noop" | "stale";
+  route: NodeCompletionRoute;
+  receipt: PlannerCompletionReceipt | null;
+  before: CompletionState;
+  after: CompletionState | null;
+};
+type CompletableNode = {
+  _id: string;
+  kind: string;
+  taskStatus?: string | null;
+  sourceMeta?: unknown;
+  dueAt?: number | null;
+  dueEndAt?: number | null;
+  revision?: number;
+};
+type CompleteNodeFn = (
+  node: CompletableNode,
+  intent: "complete" | "reopen",
+  plannerPageId?: Id<"pages"> | null,
+) => Promise<NodeCompletionResult>;
+const NodeCompletionContext = createContext<CompleteNodeFn>(async () => {
+  throw new Error("Completion is not available here.");
 });
 const PageSectionCollapseContext = createContext<{
   collapsedSectionKeys: Set<string>;
@@ -1767,40 +1783,6 @@ function isPlannerDayTitleNode(node: { sourceMeta?: unknown } | null | undefined
   );
 }
 
-function isPlannerCompletionTask(
-  node:
-    | Pick<Doc<"nodes">, "_id" | "parentNodeId" | "sourceMeta" | "kind">
-    | Pick<TreeNode, "_id" | "parentNodeId" | "sourceMeta" | "kind">
-    | null
-    | undefined,
-  nodeMap:
-    | Map<string, Pick<Doc<"nodes">, "_id" | "parentNodeId" | "sourceMeta" | "kind">>
-    | Map<string, Pick<TreeNode, "_id" | "parentNodeId" | "sourceMeta" | "kind">>,
-) {
-  if (!node || node.kind !== "task") {
-    return false;
-  }
-
-  return isPlannerCompletionItem(node, nodeMap);
-}
-
-function isPlannerCompletionItem(
-  node:
-    | Pick<Doc<"nodes">, "_id" | "parentNodeId" | "sourceMeta" | "kind">
-    | Pick<TreeNode, "_id" | "parentNodeId" | "sourceMeta" | "kind">
-    | null
-    | undefined,
-  nodeMap:
-    | Map<string, Pick<Doc<"nodes">, "_id" | "parentNodeId" | "sourceMeta" | "kind">>
-    | Map<string, Pick<TreeNode, "_id" | "parentNodeId" | "sourceMeta" | "kind">>,
-) {
-  const lookup = nodeMap as Map<string, { parentNodeId?: string | null; sourceMeta?: unknown }>;
-  return sharedIsPlannerCompletionItem(
-    node as { parentNodeId?: string | null; sourceMeta?: unknown } | null | undefined,
-    (id) => lookup.get(id),
-  );
-}
-
 function isNodeNoteCompleted(
   node:
     | Pick<Doc<"nodes">, "kind" | "sourceMeta">
@@ -1894,55 +1876,6 @@ function getNodeRecurrenceFrequency(
     return null;
   }
   return parseRecurrenceFrequency(sourceMeta.recurrenceFrequency);
-}
-
-function getRecurringCompletionTransition(
-  node: {
-    text: string;
-    kind: string;
-    taskStatus: string | null;
-    dueAt: number | null;
-    dueEndAt?: number | null;
-    dueTimeZone?: string | null;
-    sourceMeta?: Record<string, unknown> | null;
-  },
-  completionMode: RecurringCompletionMode,
-  workspaceTimeZone?: string | null,
-): NodeValueSnapshot | null {
-  const recurrenceFrequency = getNodeRecurrenceFrequency(node);
-  if (node.kind !== "task" || recurrenceFrequency === null || !node.dueAt) {
-    return null;
-  }
-
-  if (node.taskStatus === "done") {
-    return {
-      text: node.text,
-      kind: "task",
-      taskStatus: "todo",
-      noteCompleted: false,
-      dueAt: node.dueAt,
-      dueEndAt: node.dueEndAt ?? null,
-      recurrenceFrequency,
-    };
-  }
-
-  const nextRange = advanceRecurringDueDateRange({
-    dueAt: node.dueAt,
-    dueEndAt: node.dueEndAt ?? null,
-    frequency: recurrenceFrequency,
-    mode: completionMode,
-    timeZone: resolveTimeZone(node.dueTimeZone, workspaceTimeZone),
-  });
-
-  return {
-    text: node.text,
-    kind: "task",
-    taskStatus: "todo",
-    noteCompleted: false,
-    dueAt: nextRange.dueAt,
-    dueEndAt: nextRange.dueEndAt,
-    recurrenceFrequency,
-  };
 }
 
 function withNodeScheduleSnapshot(
@@ -3852,6 +3785,73 @@ function insertTextIntoDraft(
   };
 }
 
+// The undo entry for one setNodeCompletion result. Planner and task-page
+// completions undo through their receipt; status, note and recurring changes
+// undo by restoring the item's values. Returns null when nothing changed.
+function buildCompletionHistoryEntry({
+  node,
+  text,
+  result,
+  completionMode,
+  plannerPageId,
+  pageId,
+  focusEditorId,
+}: {
+  node: {
+    _id: string;
+    kind: string;
+    taskStatus?: string | null;
+    sourceMeta?: unknown;
+    dueAt?: number | null;
+    dueEndAt?: number | null;
+    dueTime?: string | null;
+    dueTimeZone?: string | null;
+  };
+  text: string;
+  result: NodeCompletionResult;
+  completionMode: RecurringCompletionMode;
+  plannerPageId: Id<"pages"> | null;
+  pageId: Id<"pages">;
+  focusEditorId: string;
+}): HistoryEntry | null {
+  if (result.status !== "applied") {
+    return null;
+  }
+  const nodeId = node._id as Id<"nodes">;
+  if (result.receipt) {
+    if (!plannerCompletionReceiptHasEffects(result.receipt)) {
+      return null;
+    }
+    return {
+      type: "complete_planner_task",
+      pageId,
+      redoTarget: {
+        kind: "completion",
+        nodeId,
+        ...(result.route === "plannerPreview" && plannerPageId ? { plannerPageId } : {}),
+      },
+      completionMode,
+      receipt: result.receipt,
+      focusEditorId,
+    };
+  }
+  if (!result.after) {
+    return null;
+  }
+  const before: NodeValueSnapshot = {
+    ...toNodeValueSnapshot({ ...node, text } as Parameters<typeof toNodeValueSnapshot>[0]),
+    text,
+  };
+  const after: NodeValueSnapshot = {
+    ...before,
+    taskStatus: (before.kind === "task" ? result.after.taskStatus : null) as NodeValueSnapshot["taskStatus"],
+    noteCompleted: result.after.noteCompleted,
+    dueAt: result.after.dueAt,
+    dueEndAt: result.after.dueEndAt,
+  };
+  return { type: "update_node", pageId, nodeId, before, after, focusEditorId };
+}
+
 function toNodeValueSnapshot(
   value:
     | Pick<Doc<"nodes">, "text" | "kind" | "taskStatus" | "dueAt" | "dueEndAt" | "dueTime" | "dueTimeZone">
@@ -4623,7 +4623,7 @@ function ConfiguredWorkspace({
     api.workspace.setTaskPageDoneArchiveEnabled,
   );
   const setPageDataDumpExcludedRaw = useMutation(api.workspace.setPageDataDumpExcluded);
-  const completeTaskPageTaskRaw = useMutation(api.workspace.completeTaskPageTask);
+  const setNodeCompletionRaw = useMutation(api.workspace.setNodeCompletion);
   const forceArchiveTaskPageItemRaw = useMutation(api.workspace.forceArchiveTaskPageItem);
   const setModelPageCustomPrompt = useMutation(api.workspace.setModelPageCustomPrompt);
   const setWorkspaceInbox = useMutation(api.workspace.setWorkspaceInbox);
@@ -4719,9 +4719,9 @@ function ConfiguredWorkspace({
       applyOptimisticPageDataDumpExcluded(localStore, args);
     },
   );
-  const completeTaskPageTaskMutation = completeTaskPageTaskRaw.withOptimisticUpdate(
+  const setNodeCompletionMutation = setNodeCompletionRaw.withOptimisticUpdate(
     (localStore, args) => {
-      applyOptimisticTaskPageTaskCompletion(localStore, args);
+      applyOptimisticNodeCompletion(localStore, args);
     },
   );
   const updateNodeMutation = updateNodeRaw.withOptimisticUpdate((localStore, args) => {
@@ -4977,34 +4977,77 @@ function ConfiguredWorkspace({
   const suggestRandomPlannerTask = useAction(api.plannerAi.suggestRandomPlannerTask);
   const addRandomPlannerTaskWithAi = useAction(api.plannerAi.addRandomPlannerTaskWithAi);
   const suggestNextPlannerTask = useAction(api.plannerAi.suggestNextPlannerTask);
-  const completePlannerTaskRaw = useMutation(api.planner.completePlannerTask);
   const undoCompletePlannerTaskRaw = useMutation(api.planner.undoCompletePlannerTask);
-  const completePlannerTaskMutation = completePlannerTaskRaw.withOptimisticUpdate(
-    (localStore, args) => {
-      applyOptimisticPlannerTaskCompletion(localStore, args);
+  // Latest loaded nodes, for callers that run after an await (redo, retries).
+  const latestNodeMapRef = useRef<Map<string, CompletableNode>>(new Map());
+  // Sends the revision the caller saw. A stale answer is retried once with the
+  // server's revision only when the item still looks the way the caller saw it
+  // (see completionStateMatches), so a text edit doesn't block the checkbox but
+  // a completion made elsewhere is never repeated.
+  const setNodeCompletionChecked = useCallback(
+    async (
+      args: Parameters<typeof setNodeCompletionMutation>[0],
+      seen: CompletableNode | "redo",
+    ): Promise<NodeCompletionResult> => {
+      const first = (await setNodeCompletionMutation(args)) as NodeCompletionResult;
+      if (first.status !== "stale") {
+        return first;
+      }
+      // Redo of an item this view hasn't loaded (a planner preview's source):
+      // the user asked for it again, so retry unless it's already in that state.
+      const retry =
+        seen === "redo"
+          ? !first.before.archived && (args.intent === "complete") !== isNodeCompleted({
+              kind: first.before.kind,
+              taskStatus: first.before.taskStatus,
+              sourceMeta: { noteCompleted: first.before.noteCompleted },
+            })
+          : completionStateMatches(seen, first.before);
+      if (!retry) {
+        return first;
+      }
+      return (await setNodeCompletionMutation({
+        ...args,
+        expectedRevision: first.before.revision,
+      })) as NodeCompletionResult;
     },
+    [setNodeCompletionMutation],
   );
-  const completePlannerTask = useCallback(
-    (args: Parameters<typeof completePlannerTaskMutation>[0]) =>
+  const completeNode = useCallback<CompleteNodeFn>(
+    (node, intent, plannerPageId) =>
       runTrackedMutation(
-        async () => await completePlannerTaskMutation(args),
-        {
-          nodeIds: [args.plannerNodeId as string],
-        },
-        "Could not complete that planner item.",
+        async () =>
+          await setNodeCompletionChecked(
+            {
+              ownerKey,
+              nodeId: node._id as Id<"nodes">,
+              intent,
+              completionMode: recurringCompletionMode,
+              expectedRevision: node.revision ?? 0,
+              ...(plannerPageId ? { plannerPageId } : {}),
+            },
+            node,
+          ),
+        { nodeIds: [node._id] },
+        "Could not update that item.",
       ),
-    [completePlannerTaskMutation, runTrackedMutation],
+    [ownerKey, recurringCompletionMode, runTrackedMutation, setNodeCompletionChecked],
   );
-  const completeTaskPageTask = useCallback(
-    (args: CompleteTaskPageTaskArgs) =>
-      runTrackedMutation(
-        async () => await completeTaskPageTaskMutation(args),
-        {
-          nodeIds: [args.nodeId as string],
-        },
-        "Could not complete that task item.",
-      ),
-    [completeTaskPageTaskMutation, runTrackedMutation],
+  // History redo: re-complete with whatever revision is loaded now.
+  const redoNodeCompletion = useCallback(
+    (args: {
+      ownerKey: string;
+      nodeId: Id<"nodes">;
+      intent: "complete" | "reopen";
+      completionMode: RecurringCompletionMode;
+      expectedRevision: number;
+      plannerPageId?: Id<"pages">;
+    }) => setNodeCompletionChecked(args, latestNodeMapRef.current.get(args.nodeId as string) ?? "redo"),
+    [setNodeCompletionChecked],
+  );
+  const getNodeRevision = useCallback(
+    (nodeId: Id<"nodes">) => latestNodeMapRef.current.get(nodeId as string)?.revision ?? 0,
+    [],
   );
   const findNodesText = useAction(api.ai.findNodesText);
   const searchNodes = useAction(api.ai.searchNodes);
@@ -5295,8 +5338,8 @@ function ConfiguredWorkspace({
     moveNode: moveNodeRaw,
     setNodeTreeArchived: setNodeTreeArchivedRaw,
     setNodeTreesArchivedBatch: setNodeTreesArchivedBatchRaw,
-    completePlannerTask: completePlannerTaskRaw,
-    completeTaskPageTask: completeTaskPageTaskRaw,
+    setNodeCompletion: redoNodeCompletion,
+    getNodeRevision,
     forceArchiveTaskPageItem: forceArchiveTaskPageItemRaw,
     undoCompletePlannerTask: undoCompletePlannerTaskRaw,
     isDisabled: activePageTree?.page?.archived ?? false,
@@ -6129,6 +6172,9 @@ function ConfiguredWorkspace({
     multiPageIncludedPageTrees,
     sidebarTree?.nodes,
   ]);
+  useEffect(() => {
+    latestNodeMapRef.current = workspaceNodeMap;
+  }, [workspaceNodeMap]);
   const paletteContextNodeId =
     selectedNodeIds.size === 1 ? ([...selectedNodeIds][0] ?? null) : actionContextNodeId;
   const taskScheduleTargetNode = useMemo(() => {
@@ -10686,19 +10732,10 @@ function ConfiguredWorkspace({
       return;
     }
 
-    const historyEntries: Array<Extract<HistoryEntry, { type: "update_node" }>> = [];
-    const updates: Array<{
-      nodeId: Id<"nodes">;
-      text: string;
-      kind: "note" | "task";
-      lockKind: boolean;
-      taskStatus: NodeValueSnapshot["taskStatus"];
-      noteCompleted: boolean;
-      dueAt: number | null;
-      dueEndAt: number | null;
-      recurrenceFrequency: RecurrenceFrequency | null;
-    }> = [];
-
+    // Each item goes through workspace:setNodeCompletion, which routes it
+    // (planner, task page Done archive, recurring, note, plain task).
+    const updateEntries: Array<Extract<HistoryEntry, { type: "update_node" }>> = [];
+    let clearSelection = false;
     for (const nodeId of orderedSelectedNodeIds) {
       const node = workspaceNodeMap.get(nodeId);
       if (!node || isNodeLocked(node)) {
@@ -10710,125 +10747,54 @@ function ConfiguredWorkspace({
         continue;
       }
 
-      if (
-        (isPlannerCompletionTask(node, workspaceNodeMap) && node.taskStatus !== "done") ||
-        (node.kind === "note" &&
-          !isNodeNoteCompleted(node) &&
-          isPlannerCompletionItem(node, workspaceNodeMap))
-      ) {
-        const receipt = (await completePlannerTask({
-          ownerKey,
-          plannerNodeId: node._id as Id<"nodes">,
-          completionMode: recurringCompletionMode,
-        })) as PlannerCompletionReceipt | null;
-        clearNodeSelection();
-        if (plannerCompletionReceiptHasEffects(receipt)) {
-          history.pushUndoEntry({
-            type: "complete_planner_task",
-            pageId: node.pageId as Id<"pages">,
-            redoTarget: { kind: "plannerNode", plannerNodeId: node._id as Id<"nodes"> },
-            completionMode: recurringCompletionMode,
-            receipt: receipt!,
-            focusEditorId: getNodeEditorId(node._id as Id<"nodes">),
-          });
-        }
-        continue;
-      }
-
-      const pageSourceMeta =
-        page && typeof page.sourceMeta === "object" && page.sourceMeta
-          ? (page.sourceMeta as Record<string, unknown>)
-          : null;
-      if (
-        node.kind === "task" &&
-        getPageMeta(page).pageType === "task" &&
-        pageSourceMeta?.archiveCompletedRootTasksToDone === true
-      ) {
-        const taskPageResult = (await completeTaskPageTask({
-          ownerKey,
-          nodeId: node._id as Id<"nodes">,
-          completionMode: recurringCompletionMode,
-        })) as { receipt?: PlannerCompletionReceipt } | null;
-        clearNodeSelection();
-        const taskPageReceipt = taskPageResult?.receipt ?? null;
-        if (plannerCompletionReceiptHasEffects(taskPageReceipt)) {
-          history.pushUndoEntry({
-            type: "complete_planner_task",
-            pageId: node.pageId as Id<"pages">,
-            redoTarget: { kind: "taskPage", nodeId: node._id as Id<"nodes"> },
-            completionMode: recurringCompletionMode,
-            receipt: taskPageReceipt!,
-            focusEditorId: getNodeEditorId(node._id as Id<"nodes">),
-          });
-        }
-        continue;
-      }
-
-      const beforeSnapshot = toNodeValueSnapshot(node);
-      const afterSnapshot: NodeValueSnapshot =
-        node.kind === "task"
-          ? (getRecurringCompletionTransition(node, recurringCompletionMode, workspaceTimeZone) ??
-            withNodeScheduleSnapshot({
-              text: node.text,
-              kind: "task",
-              taskStatus: node.taskStatus === "done" ? "todo" : "done",
-              noteCompleted: false,
-              dueAt: node.dueAt ?? null,
-              dueEndAt: node.dueEndAt ?? null,
-              recurrenceFrequency: getNodeRecurrenceFrequency(node),
-            }, node))
-          : withNodeScheduleSnapshot({
-              text: node.text,
-              kind: "note",
-              taskStatus: null,
-              noteCompleted: !isNodeNoteCompleted(node),
-              dueAt: null,
-              dueEndAt: null,
-              recurrenceFrequency: null,
-            }, node);
-
-      updates.push({
-        nodeId: node._id as Id<"nodes">,
-        text: afterSnapshot.text,
-        kind: afterSnapshot.kind,
-        lockKind: true,
-        taskStatus: afterSnapshot.taskStatus,
-        noteCompleted: afterSnapshot.noteCompleted,
-        dueAt: afterSnapshot.dueAt ?? null,
-        dueEndAt: afterSnapshot.dueEndAt ?? null,
-        recurrenceFrequency: afterSnapshot.recurrenceFrequency ?? null,
-      });
-
-      historyEntries.push({
-        type: "update_node",
+      const result = await completeNode(node, completionIntentFor(node));
+      const entry = buildCompletionHistoryEntry({
+        node,
+        text: node.text,
+        result,
+        completionMode: recurringCompletionMode,
+        plannerPageId: null,
         pageId: node.pageId as Id<"pages">,
-        nodeId: node._id as Id<"nodes">,
-        before: beforeSnapshot,
-        after: afterSnapshot,
         focusEditorId: getNodeEditorId(node._id as Id<"nodes">),
       });
+      if (result.receipt) {
+        // Planner and Done-archive completions move the item away.
+        clearSelection = true;
+        if (entry) {
+          history.pushUndoEntry(entry);
+        }
+        continue;
+      }
+      if (entry?.type === "update_node") {
+        updateEntries.push(entry);
+      }
     }
 
-    await executeNodeUpdateBatch(updates);
+    if (clearSelection) {
+      clearNodeSelection();
+    }
 
-    if (historyEntries.length === 0) {
+    if (updateEntries.length === 0) {
       return;
     }
 
-    if (historyEntries.length === 1) {
-      history.pushUndoEntry(historyEntries[0]!);
-      selectSingleNode(historyEntries[0]!.nodeId as string);
+    if (updateEntries.length === 1) {
+      const entry = updateEntries[0]!;
+      history.pushUndoEntry(entry);
+      if (!clearSelection) {
+        selectSingleNode(entry.nodeId as string);
+      }
       return;
     }
 
     history.pushUndoEntry({
       type: "compound",
-      pageId: historyEntries[0]!.pageId,
-      entries: historyEntries,
-      focusAfterUndoId: historyEntries[0]!.focusEditorId,
-      focusAfterRedoId: historyEntries[historyEntries.length - 1]!.focusEditorId,
+      pageId: updateEntries[0]!.pageId,
+      entries: updateEntries,
+      focusAfterUndoId: updateEntries[0]!.focusEditorId,
+      focusAfterRedoId: updateEntries[updateEntries.length - 1]!.focusEditorId,
     });
-  }, [clearNodeSelection, completePlannerTask, completeTaskPageTask, executeNodeUpdateBatch, history, ownerKey, pagesById, recurringCompletionMode, workspaceTimeZone, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
+  }, [clearNodeSelection, completeNode, history, pagesById, recurringCompletionMode, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
 
   const deleteHighlightedNodes = useCallback(async () => {
     if (selectedNodeIds.size === 0) {
@@ -14034,7 +14000,6 @@ function ConfiguredWorkspace({
                       onOpenFindQuery={openFindPaletteForQuery}
                       onToggleNodeFavorite={toggleNodeFavorite}
                       recurringCompletionMode={recurringCompletionMode}
-                      completeTaskPageTask={completeTaskPageTask}
                       plannerSymbolModeEnabled={
                         pageMeta.pageType === "planner" && isPlannerSymbolModeEnabled
                       }
@@ -14094,7 +14059,6 @@ function ConfiguredWorkspace({
                       onOpenFindQuery={openFindPaletteForQuery}
                       onToggleNodeFavorite={toggleNodeFavorite}
                       recurringCompletionMode={recurringCompletionMode}
-                      completeTaskPageTask={completeTaskPageTask}
                     />
                   </div>
                 ) : pageMeta.pageType === "planner" ? (
@@ -15114,7 +15078,6 @@ function ConfiguredWorkspace({
                               onOpenFindQuery={openFindPaletteForQuery}
                               onToggleNodeFavorite={toggleNodeFavorite}
                               recurringCompletionMode={recurringCompletionMode}
-                              completeTaskPageTask={completeTaskPageTask}
                               depthOffset={sectionDepthOffset}
                             />
                           ) : (
@@ -15164,7 +15127,6 @@ function ConfiguredWorkspace({
                               onOpenFindQuery={openFindPaletteForQuery}
                               onToggleNodeFavorite={toggleNodeFavorite}
                               recurringCompletionMode={recurringCompletionMode}
-                              completeTaskPageTask={completeTaskPageTask}
                               depthOffset={sectionDepthOffset}
                             />
                           ),
@@ -16491,7 +16453,6 @@ function EmbeddedMultiPageBlock({
   onOpenFindQuery,
   onToggleNodeFavorite,
   recurringCompletionMode,
-  completeTaskPageTask,
   depthOffset,
 }: {
   pageTree: PageTreeResult;
@@ -16543,7 +16504,6 @@ function EmbeddedMultiPageBlock({
   onOpenFindQuery: (query: string) => void;
   onToggleNodeFavorite: (pageId: Id<"pages">, nodeId: Id<"nodes">) => void;
   recurringCompletionMode: RecurringCompletionMode;
-  completeTaskPageTask: CompleteTaskPageTaskMutation;
   depthOffset: number;
 }) {
   const page = pageTree.page;
@@ -16661,7 +16621,6 @@ function EmbeddedMultiPageBlock({
     onOpenFindQuery,
     onToggleNodeFavorite,
     recurringCompletionMode,
-    completeTaskPageTask,
   };
 
   return (
@@ -16822,7 +16781,6 @@ function EmbeddedMultiPageNodeBlock({
   onOpenFindQuery,
   onToggleNodeFavorite,
   recurringCompletionMode,
-  completeTaskPageTask,
   depthOffset,
 }: {
   nodeTree: MultiPageNodeTreeResult;
@@ -16874,7 +16832,6 @@ function EmbeddedMultiPageNodeBlock({
   onOpenFindQuery: (query: string) => void;
   onToggleNodeFavorite: (pageId: Id<"pages">, nodeId: Id<"nodes">) => void;
   recurringCompletionMode: RecurringCompletionMode;
-  completeTaskPageTask: CompleteTaskPageTaskMutation;
   depthOffset: number;
 }) {
   const sourcePage = nodeTree.sourcePage;
@@ -16938,7 +16895,6 @@ function EmbeddedMultiPageNodeBlock({
         onOpenFindQuery={onOpenFindQuery}
         onToggleNodeFavorite={onToggleNodeFavorite}
         recurringCompletionMode={recurringCompletionMode}
-        completeTaskPageTask={completeTaskPageTask}
         depthOffset={depthOffset}
         headerDetail={
           <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
@@ -17013,7 +16969,6 @@ function PageSection({
   onOpenFindQuery,
   onToggleNodeFavorite = () => {},
   recurringCompletionMode,
-  completeTaskPageTask = async () => undefined,
   depthOffset = 0,
   mobileIndentStep = OUTLINE_MOBILE_INDENT_STEP,
   action = null,
@@ -17078,7 +17033,6 @@ function PageSection({
   onOpenFindQuery: (query: string) => void;
   onToggleNodeFavorite?: (pageId: Id<"pages">, nodeId: Id<"nodes">) => void;
   recurringCompletionMode: RecurringCompletionMode;
-  completeTaskPageTask?: CompleteTaskPageTaskMutation;
   depthOffset?: number;
   mobileIndentStep?: number;
   action?: ReactNode;
@@ -17195,7 +17149,6 @@ function PageSection({
           onOpenFindQuery={onOpenFindQuery}
           onToggleNodeFavorite={onToggleNodeFavorite}
           recurringCompletionMode={recurringCompletionMode}
-          completeTaskPageTask={completeTaskPageTask}
           mobileIndentStep={mobileIndentStep}
           plannerSymbolModeEnabled={plannerSymbolModeEnabled}
           plannerSymbolModePlannerPageId={plannerSymbolModePlannerPageId}
@@ -17257,7 +17210,6 @@ function OutlineNodeList({
   onOpenFindQuery,
   onToggleNodeFavorite = () => {},
   recurringCompletionMode,
-  completeTaskPageTask = async () => undefined,
   mobileIndentStep = OUTLINE_MOBILE_INDENT_STEP,
   showChildrenDepth = 0,
   showChildrenAncestorNodeIds = EMPTY_NODE_ID_SET,
@@ -17320,7 +17272,6 @@ function OutlineNodeList({
   onOpenFindQuery: (query: string) => void;
   onToggleNodeFavorite?: (pageId: Id<"pages">, nodeId: Id<"nodes">) => void;
   recurringCompletionMode: RecurringCompletionMode;
-  completeTaskPageTask?: CompleteTaskPageTaskMutation;
   mobileIndentStep?: number;
   showChildrenDepth?: number;
   showChildrenAncestorNodeIds?: Set<string>;
@@ -17415,7 +17366,6 @@ function OutlineNodeList({
           onOpenFindQuery={onOpenFindQuery}
           onToggleNodeFavorite={onToggleNodeFavorite}
           recurringCompletionMode={recurringCompletionMode}
-          completeTaskPageTask={completeTaskPageTask}
           mobileIndentStep={mobileIndentStep}
           showChildrenDepth={showChildrenDepth}
           showChildrenAncestorNodeIds={showChildrenAncestorNodeIds}
@@ -17556,7 +17506,6 @@ function LinkedNodeChildrenBlock({
   onOpenFindQuery,
   onToggleNodeFavorite,
   recurringCompletionMode,
-  completeTaskPageTask,
   mobileIndentStep,
   showChildrenDepth,
   ancestorNodeIds,
@@ -17609,7 +17558,6 @@ function LinkedNodeChildrenBlock({
   onOpenFindQuery: (query: string) => void;
   onToggleNodeFavorite: (pageId: Id<"pages">, nodeId: Id<"nodes">) => void;
   recurringCompletionMode: RecurringCompletionMode;
-  completeTaskPageTask: CompleteTaskPageTaskMutation;
   mobileIndentStep: number;
   showChildrenDepth: number;
   ancestorNodeIds: Set<string>;
@@ -17853,7 +17801,6 @@ function LinkedNodeChildrenBlock({
         onOpenFindQuery={onOpenFindQuery}
         onToggleNodeFavorite={onToggleNodeFavorite}
         recurringCompletionMode={recurringCompletionMode}
-        completeTaskPageTask={completeTaskPageTask}
         mobileIndentStep={mobileIndentStep}
         showChildrenDepth={showChildrenDepth + 1}
         showChildrenAncestorNodeIds={ancestorNodeIds}
@@ -19305,7 +19252,6 @@ function OutlineNodeEditor({
   onOpenFindQuery,
   onToggleNodeFavorite = () => {},
   recurringCompletionMode,
-  completeTaskPageTask = async () => undefined,
   mobileIndentStep = OUTLINE_MOBILE_INDENT_STEP,
   showChildrenDepth = 0,
   showChildrenAncestorNodeIds = EMPTY_NODE_ID_SET,
@@ -19373,7 +19319,6 @@ function OutlineNodeEditor({
   onOpenFindQuery: (query: string) => void;
   onToggleNodeFavorite?: (pageId: Id<"pages">, nodeId: Id<"nodes">) => void;
   recurringCompletionMode: RecurringCompletionMode;
-  completeTaskPageTask?: CompleteTaskPageTaskMutation;
   mobileIndentStep?: number;
   showChildrenDepth?: number;
   showChildrenAncestorNodeIds?: Set<string>;
@@ -19384,14 +19329,7 @@ function OutlineNodeEditor({
   const onCopyNodeLink = useContext(NodeCopyLinkContext);
   const { openTaskSchedule, openNoteDate } = useContext(NodeScheduleActionContext);
   const isMobileLayout = useIsMobileLayout();
-  const completePlannerTaskRaw = useMutation(api.planner.completePlannerTask);
-  const completePlannerSourceTask =
-    useMutation(api.planner.completePlannerSourceTask) as CompletePlannerSourceTaskMutation;
-  const completePlannerTaskMutation = completePlannerTaskRaw.withOptimisticUpdate(
-    (localStore, args) => {
-      applyOptimisticPlannerTaskCompletion(localStore, args);
-    },
-  );
+  const completeNode = useContext(NodeCompletionContext);
   const [draft, setDraft] = useState(node.text);
   const [isFocused, setIsFocused] = useState(false);
   const [caretPosition, setCaretPosition] = useState<number | null>(null);
@@ -20247,7 +20185,7 @@ function OutlineNodeEditor({
       }
 
       void runNodeAction(
-        handleToggleTask,
+        handleToggleCompletion,
         "Could not complete that task.",
       ).catch(() => undefined);
       return;
@@ -20512,266 +20450,57 @@ function OutlineNodeEditor({
     return result;
   };
 
-  const completePlannedSourceTaskIfAvailable = async () => {
-    if (!plannerLinkedSourceCompletionPageId) {
-      return false;
-    }
-
-    if (node.kind !== "task") {
-      return false;
-    }
-
-    const result = await completePlannerSourceTask({
-      ownerKey,
-      plannerPageId: plannerLinkedSourceCompletionPageId,
-      sourceTaskNodeId: node._id as Id<"nodes">,
-      completionMode: recurringCompletionMode,
-    });
-    const sourceReceipt = (result as { receipt?: PlannerCompletionReceipt }).receipt ?? null;
-    if (
-      result.completedPlannerNodeId !== null &&
-      plannerCompletionReceiptHasEffects(sourceReceipt)
-    ) {
-      history.pushUndoEntry({
-        type: "complete_planner_task",
-        pageId: pageId as Id<"pages">,
-        redoTarget: {
-          kind: "plannerNode",
-          plannerNodeId: result.completedPlannerNodeId as Id<"nodes">,
-        },
-        completionMode: recurringCompletionMode,
-        receipt: sourceReceipt!,
-        focusEditorId: editorId,
-      });
-    }
-    return result.completedPlannerNodeId !== null;
-  };
-
-  const handleToggleTask = async () => {
-    if (node.kind !== "task" || isDisabled) {
-      return;
-    }
-
-    const saveResult = await commitNodeText(draft);
-    if (saveResult.deleted || !saveResult.parsed) {
-      return;
-    }
-
-    if (isPlannerCompletionTask(node, nodeMap) && node.taskStatus !== "done") {
-      const receipt = (await completePlannerTaskMutation({
-        ownerKey,
-        plannerNodeId: node._id as Id<"nodes">,
-        completionMode: recurringCompletionMode,
-      })) as PlannerCompletionReceipt | null;
-      history.resetTrackedValue(editorId, editorTarget, saveResult.parsed.text);
-      setDraft(saveResult.parsed.text);
-      if (plannerCompletionReceiptHasEffects(receipt)) {
-        history.pushUndoEntry({
-          type: "complete_planner_task",
-          pageId: pageId as Id<"pages">,
-          redoTarget: { kind: "plannerNode", plannerNodeId: node._id as Id<"nodes"> },
-          completionMode: recurringCompletionMode,
-          receipt: receipt!,
-          focusEditorId: editorId,
-        });
-      }
-      return;
-    }
-
-    if (await completePlannedSourceTaskIfAvailable()) {
-      history.resetTrackedValue(editorId, editorTarget, saveResult.parsed.text);
-      setDraft(saveResult.parsed.text);
-      return;
-    }
-
-    const currentPage = pagesById.get(pageId as string) ?? null;
-    const currentPageSourceMeta =
-      currentPage && typeof currentPage.sourceMeta === "object" && currentPage.sourceMeta
-        ? (currentPage.sourceMeta as Record<string, unknown>)
-        : null;
-    if (
-      node.kind === "task" &&
-      getPageMeta(currentPage).pageType === "task" &&
-      currentPageSourceMeta?.archiveCompletedRootTasksToDone === true
-    ) {
-      const taskPageResult = (await completeTaskPageTask({
-        ownerKey,
-        nodeId: node._id as Id<"nodes">,
-        completionMode: recurringCompletionMode,
-      })) as { receipt?: PlannerCompletionReceipt } | null;
-      history.resetTrackedValue(editorId, editorTarget, saveResult.parsed.text);
-      setDraft(saveResult.parsed.text);
-      const taskPageReceipt = taskPageResult?.receipt ?? null;
-      if (plannerCompletionReceiptHasEffects(taskPageReceipt)) {
-        history.pushUndoEntry({
-          type: "complete_planner_task",
-          pageId: pageId as Id<"pages">,
-          redoTarget: { kind: "taskPage", nodeId: node._id as Id<"nodes"> },
-          completionMode: recurringCompletionMode,
-          receipt: taskPageReceipt!,
-          focusEditorId: editorId,
-        });
-      }
-      return;
-    }
-
-    const beforeSnapshot = withNodeScheduleSnapshot({
-      text: saveResult.parsed.text,
-      kind: "task",
-      taskStatus: (node.taskStatus ?? "todo") as NodeValueSnapshot["taskStatus"],
-      noteCompleted: false,
-      dueAt: node.dueAt ?? null,
-      dueEndAt: node.dueEndAt ?? null,
-      recurrenceFrequency,
-    }, node);
-    const afterSnapshot =
-      getRecurringCompletionTransition(
-        {
-          text: saveResult.parsed.text,
-          kind: node.kind,
-          taskStatus: node.taskStatus,
-          dueAt: node.dueAt,
-          dueEndAt: node.dueEndAt,
-          sourceMeta: node.sourceMeta,
-        },
-        recurringCompletionMode,
-      ) ??
-      withNodeScheduleSnapshot({
-        text: saveResult.parsed.text,
-        kind: "task",
-        taskStatus: node.taskStatus === "done" ? "todo" : "done",
-        noteCompleted: false,
-        dueAt: node.dueAt ?? null,
-        dueEndAt: node.dueEndAt ?? null,
-        recurrenceFrequency,
-      }, node);
-
-    if (
-      isPlannerCompletionItem(node, nodeMap) &&
-      !isNoteCompleted &&
-      node.taskStatus !== "done"
-    ) {
-      await completePlannerTaskMutation({
-        ownerKey,
-        plannerNodeId: node._id as Id<"nodes">,
-        completionMode: recurringCompletionMode,
-      });
-      history.resetTrackedValue(editorId, editorTarget, saveResult.parsed.text);
-      setDraft(saveResult.parsed.text);
-      return;
-    }
-
-    await updateNode({
-      ownerKey,
-      nodeId: node._id as Id<"nodes">,
-      text: afterSnapshot.text,
-      kind: afterSnapshot.kind,
-      lockKind: true,
-      taskStatus: afterSnapshot.taskStatus,
-      noteCompleted: false,
-      dueAt: afterSnapshot.dueAt,
-      dueEndAt: afterSnapshot.dueEndAt,
-      recurrenceFrequency: afterSnapshot.recurrenceFrequency,
-    });
-    history.commitTrackedValue(
-      editorId,
-      editorTarget,
-      afterSnapshot.text,
-    );
-    setDraft(afterSnapshot.text);
-    const toggleEntry: HistoryEntry = {
-      type: "update_node",
-      pageId,
-      nodeId: node._id as Id<"nodes">,
-      before: beforeSnapshot,
-      after: afterSnapshot,
-      focusEditorId: editorId,
-    };
-
-    if (saveResult.updateEntry) {
-      history.pushUndoEntry({
-        type: "compound",
-        pageId,
-        entries: [saveResult.updateEntry, toggleEntry],
-        focusAfterUndoId: editorId,
-        focusAfterRedoId: editorId,
-      });
-      return;
-    }
-
-    history.pushUndoEntry(toggleEntry);
-  };
-
+  // Checkbox: workspace:setNodeCompletion decides what completing means here
+  // (planner, Done archive, recurring roll-forward, note, plain task). In a
+  // planner preview it completes that planner's copy of this source task.
   const handleToggleCompletion = async () => {
     if (isDisabled) {
       return;
     }
 
-    if (node.kind === "task") {
-      await handleToggleTask();
-      return;
-    }
-
     const saveResult = await commitNodeText(draft);
     if (saveResult.deleted || !saveResult.parsed) {
       return;
     }
 
-    const beforeSnapshot = withNodeScheduleSnapshot({
+    const intent = completionIntentFor(node);
+    const plannerPageId =
+      intent === "complete" && node.kind === "task" ? plannerLinkedSourceCompletionPageId : null;
+    const result = await completeNode(node, intent, plannerPageId);
+    const toggleEntry = buildCompletionHistoryEntry({
+      node,
       text: saveResult.parsed.text,
-      kind: "note",
-      taskStatus: null,
-      noteCompleted: isNoteCompleted,
-      recurrenceFrequency: null,
-    }, node);
-    const afterSnapshot = withNodeScheduleSnapshot({
-      text: saveResult.parsed.text,
-      kind: "note",
-      taskStatus: null,
-      noteCompleted: !isNoteCompleted,
-      recurrenceFrequency: null,
-    }, node);
-
-    await updateNode({
-      ownerKey,
-      nodeId: node._id as Id<"nodes">,
-      text: afterSnapshot.text,
-      kind: afterSnapshot.kind,
-      lockKind: true,
-      taskStatus: null,
-      noteCompleted: afterSnapshot.noteCompleted,
-      dueAt: afterSnapshot.dueAt,
-      dueEndAt: afterSnapshot.dueEndAt,
-      recurrenceFrequency: afterSnapshot.recurrenceFrequency,
-    });
-    history.commitTrackedValue(
-      editorId,
-      editorTarget,
-      afterSnapshot.text,
-    );
-    setDraft(afterSnapshot.text);
-
-    const toggleEntry: HistoryEntry = {
-      type: "update_node",
-      pageId,
-      nodeId: node._id as Id<"nodes">,
-      before: beforeSnapshot,
-      after: afterSnapshot,
+      result,
+      completionMode: recurringCompletionMode,
+      plannerPageId,
+      pageId: pageId as Id<"pages">,
       focusEditorId: editorId,
-    };
+    });
 
-    if (saveResult.updateEntry) {
-      history.pushUndoEntry({
-        type: "compound",
-        pageId,
-        entries: [saveResult.updateEntry, toggleEntry],
-        focusAfterUndoId: editorId,
-        focusAfterRedoId: editorId,
-      });
+    if (toggleEntry?.type === "update_node") {
+      history.commitTrackedValue(editorId, editorTarget, saveResult.parsed.text);
+      setDraft(saveResult.parsed.text);
+      history.pushUndoEntry(
+        saveResult.updateEntry
+          ? {
+              type: "compound",
+              pageId,
+              entries: [saveResult.updateEntry, toggleEntry],
+              focusAfterUndoId: editorId,
+              focusAfterRedoId: editorId,
+            }
+          : toggleEntry,
+      );
       return;
     }
 
-    history.pushUndoEntry(toggleEntry);
+    history.resetTrackedValue(editorId, editorTarget, saveResult.parsed.text);
+    setDraft(saveResult.parsed.text);
+    if (toggleEntry) {
+      history.pushUndoEntry(toggleEntry);
+    } else if (saveResult.updateEntry) {
+      history.pushUndoEntry(saveResult.updateEntry);
+    }
   };
 
   const handleToggleNodeKind = async () => {
@@ -22357,7 +22086,6 @@ function OutlineNodeEditor({
                   onOpenFindQuery={onOpenFindQuery}
                   onToggleNodeFavorite={onToggleNodeFavorite}
                   recurringCompletionMode={recurringCompletionMode}
-                  completeTaskPageTask={completeTaskPageTask}
                   mobileIndentStep={mobileIndentStep}
                   showChildrenDepth={showChildrenDepth}
                   ancestorNodeIds={
@@ -22446,7 +22174,6 @@ function OutlineNodeEditor({
               onOpenFindQuery={onOpenFindQuery}
               onToggleNodeFavorite={onToggleNodeFavorite}
               recurringCompletionMode={recurringCompletionMode}
-              completeTaskPageTask={completeTaskPageTask}
               mobileIndentStep={mobileIndentStep}
               showChildrenDepth={showChildrenDepth}
               showChildrenAncestorNodeIds={showChildrenAncestorNodeIds}

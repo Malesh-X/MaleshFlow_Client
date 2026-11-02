@@ -5,8 +5,6 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
-import { advanceRecurringDueDateRange, parseRecurrenceFrequency } from "../lib/domain/recurrence";
-import { resolveTimeZone } from "../lib/domain/timeZone";
 import {
   SIDEBAR_SECTIONS,
   classifyStrayParent,
@@ -14,10 +12,8 @@ import {
   createPageArgs,
   findSectionNode,
   findStrayNodes,
-  getPageMeta,
   isNodeCompleted,
   isNodeLocked,
-  isPlannerCompletionItem,
   isUntypedSectionPage,
   kindChangeArgs,
   metaOf,
@@ -275,9 +271,10 @@ function lastChildId(nodes: TreeNode[], parent: string | null, exclude?: string)
   return siblings.at(-1)?._id ?? null;
 }
 
-// Picks the same completion path as the app's task checkbox
-// (toggleSelectedNodesCompletion in components/WorkspaceApp.tsx). Never reopens:
-// an item that is already done is left alone.
+// Completes an item through workspace:setNodeCompletion, the same server path
+// as the app's checkbox: it routes planner items, task pages with a Done
+// archive, recurring tasks and notes. intent "complete" never reopens, and the
+// revision we read makes a repeated or stale request change nothing.
 type WorkspaceSettings = { timeZone: string | null; completionMode: "dueDate" | "today" | null };
 async function workspaceSettings(): Promise<WorkspaceSettings> {
   try {
@@ -288,6 +285,22 @@ async function workspaceSettings(): Promise<WorkspaceSettings> {
   }
 }
 
+type CompletionResult = {
+  status: "applied" | "noop" | "stale";
+  route: string;
+  before: { revision: number };
+  after: { taskStatus: string | null; noteCompleted: boolean; dueAt: number | null } | null;
+};
+
+const ROUTE_LABELS: Record<string, string> = {
+  planner: "planner item (Past Weeks flow)",
+  plannerPreview: "planner copy of this task",
+  taskPage: "task page with a Done archive",
+  recurring: "recurring task, rolled forward to the next due date",
+  task: "task marked done",
+  note: "note marked completed",
+};
+
 async function completeLikeApp(nodeId: string) {
   const settings = await workspaceSettings();
   // --mode overrides the workspace setting; the app's default is dueDate.
@@ -297,39 +310,18 @@ async function completeLikeApp(nodeId: string) {
     // Completed planner and task-page items are archived (Past Weeks / Done).
     return console.log("That item is archived (completed planner and task-page items are); nothing changed.");
   }
-  const { node, page, nodes } = await loadActiveNode(nodeId);
+  const { node } = await loadActiveNode(nodeId);
   if (isNodeCompleted(node)) return console.log("Already done; nothing changed.");
-  const nodeMap = new Map(nodes.map((n) => [n._id, n]));
-  const pageMeta = metaOf(page);
-  const isSidebarPage = pageMeta.specialPage === "sidebar";
-  const isTaskPage = !isSidebarPage && getPageMeta(page).pageType === "task";
-
-  if (isPlannerCompletionItem(node, (id) => nodeMap.get(id))) {
-    // Planner day/focus items: completing the last open item archives the day to Past Weeks.
-    console.error(`Planner item on "${page.title}": using planner:completePlannerTask.`);
-    await mutation("planner:completePlannerTask", { plannerNodeId: nodeId, completionMode });
-    return ok();
-  }
-  if (node.kind !== "task") fail("Only tasks (or planner items) can be completed. Use update --task first.");
-  if (isTaskPage && pageMeta.archiveCompletedRootTasksToDone === true) {
-    console.error(`Task page "${page.title}": using workspace:completeTaskPageTask.`);
-    await mutation("workspace:completeTaskPageTask", { nodeId, completionMode });
-    return ok();
-  }
-  const frequency = parseRecurrenceFrequency(metaOf(node).recurrenceFrequency);
-  if (frequency !== null && node.dueAt) {
-    const next = advanceRecurringDueDateRange({
-      dueAt: node.dueAt,
-      dueEndAt: node.dueEndAt ?? null,
-      frequency,
-      mode: completionMode,
-      timeZone: resolveTimeZone(node.dueTimeZone, settings.timeZone),
-    });
-    console.error(`Recurring task: rolling forward to the next due date (mode ${completionMode}).`);
-    await mutation("workspace:updateNode", { nodeId, kind: "task", lockKind: true, taskStatus: "todo", dueAt: next.dueAt, dueEndAt: next.dueEndAt });
-    return ok();
-  }
-  await mutation("workspace:updateNode", { nodeId, kind: "task", lockKind: true, taskStatus: "done" });
+  const result = (await mutation("workspace:setNodeCompletion", {
+    nodeId,
+    intent: "complete",
+    completionMode,
+    expectedRevision: node.revision ?? 0,
+  })) as CompletionResult | string;
+  if (dryRun || typeof result !== "object") return ok();
+  if (result.status === "stale") fail("The item changed since it was read; nothing changed. Run done again.");
+  if (result.status === "noop") return console.log("Already done; nothing changed.");
+  console.error(`Completed: ${ROUTE_LABELS[result.route] ?? result.route} (mode ${completionMode}).`);
   return ok();
 }
 
