@@ -31,6 +31,7 @@ export const GUARDED_MUTATIONS: Record<string, GuardedEntry> = {
   "workspace:forceArchiveTaskPageItem": { checks: "node archivable", via: ["forceArchiveCore"] },
   "workspace:deleteNode": { checks: "node deletable" },
   "workspace:completeTaskPageTask": { checks: "node status editable (legacy adapter for old tabs)" },
+  "workspace:setRecurrenceBasis": { checks: "node schedule editable" },
   "workspace:setNodeCompletion": { checks: "node status editable; planner page writable for previews", via: ["runNodeCompletion"] },
   "workspace:redoCompletion": {
     checks: "re-runs the completion (node status editable, or archivable for force archive) after its own receipt checks",

@@ -23,6 +23,27 @@ export type CustomRecurrenceFrequency = {
 export type RecurrenceFrequency = RecurrencePreset | CustomRecurrenceFrequency | null;
 export type RecurringCompletionMode = "dueDate" | "today";
 
+// A recurring item's own completion basis (sourceMeta.recurrenceBasis):
+// "dueDate" advances from its due date, "today" from the day it's completed.
+// Absent means "use the workspace setting".
+export function parseRecurrenceBasis(value: unknown): RecurringCompletionMode | null {
+  return value === "dueDate" || value === "today" ? value : null;
+}
+
+export function getRecurrenceBasis(item: { sourceMeta?: unknown } | null | undefined): RecurringCompletionMode | null {
+  const meta = item && typeof item.sourceMeta === "object" && item.sourceMeta ? (item.sourceMeta as Record<string, unknown>) : {};
+  return parseRecurrenceBasis(meta.recurrenceBasis);
+}
+
+// The mode a completion uses for this item: its own basis, else the fallback
+// (the workspace setting the caller sent).
+export function completionModeFor(
+  item: { sourceMeta?: unknown } | null | undefined,
+  fallback: RecurringCompletionMode,
+): RecurringCompletionMode {
+  return getRecurrenceBasis(item) ?? fallback;
+}
+
 function pluralizeRecurrenceUnit(unit: RecurrenceUnit, interval: number) {
   return interval === 1 ? unit : `${unit}s`;
 }

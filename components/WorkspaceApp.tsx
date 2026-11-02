@@ -67,6 +67,7 @@ import {
   formatCompactDueDateRange,
   formatDueDateRange,
   getCompactRecurrenceLabel,
+  getRecurrenceBasis,
   getRecurrenceLabel,
   getTodayReferenceDate,
   isOverdueDueDateRange,
@@ -4506,14 +4507,20 @@ function ConfiguredWorkspace({
       setRecurringCompletionMode(workspaceSettings.completionMode);
     }
   }, [workspaceSettings?.completionMode]);
-  const handleRecurringCompletionModeChange = useCallback(
-    (mode: RecurringCompletionMode) => {
-      setRecurringCompletionMode(mode);
-      if (ownerKey) {
-        void setWorkspaceSettings({ ownerKey, completionMode: mode });
+  // The schedule panel's "When this task is completed" choice: the task's own
+  // completion basis. The workspace setting stays the default for tasks
+  // without one.
+  const setRecurrenceBasisMutation = useMutation(api.workspace.setRecurrenceBasis);
+  const handleTaskRecurrenceBasisChange = useCallback(
+    (nodeId: string, mode: RecurringCompletionMode) => {
+      if (!ownerKey) {
+        return;
       }
+      void setRecurrenceBasisMutation({ ownerKey, nodeId: nodeId as Id<"nodes">, basis: mode }).catch((error: unknown) => {
+        setCopySnackbarMessage(error instanceof Error ? error.message : "Could not save that setting.");
+      });
     },
-    [ownerKey, setWorkspaceSettings],
+    [ownerKey, setRecurrenceBasisMutation],
   );
   const handleWorkspaceTimeZoneChange = useCallback(
     (timeZone: string) => {
@@ -15725,8 +15732,8 @@ function ConfiguredWorkspace({
                     dueTime={taskScheduleTargetNode.dueTime ?? null}
                     dueTimeZone={taskScheduleTargetNode.dueTimeZone ?? null}
                     recurrenceFrequency={getNodeRecurrenceFrequency(taskScheduleTargetNode)}
-                    recurringCompletionMode={recurringCompletionMode}
-                    onRecurringCompletionModeChange={handleRecurringCompletionModeChange}
+                    recurringCompletionMode={getRecurrenceBasis(taskScheduleTargetNode) ?? recurringCompletionMode}
+                    onRecurringCompletionModeChange={(mode) => handleTaskRecurrenceBasisChange(taskScheduleTargetNode._id, mode)}
                     workspaceTimeZone={workspaceTimeZone}
                     onWorkspaceTimeZoneChange={handleWorkspaceTimeZoneChange}
                     onSave={(args) => handleSaveTaskSchedule(args)}

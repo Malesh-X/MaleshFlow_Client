@@ -57,10 +57,13 @@ async function setup(sourceDueAt: number, frequency: unknown = { interval: 4, un
       return id;
     });
   // The app's checkbox: workspace:setNodeCompletion with the revision it saw.
-  const complete = async (nodeId: Id<"nodes">) =>
+  // completionMode is the workspace setting, as the app sends it.
+  const complete = async (nodeId: Id<"nodes">, completionMode: "dueDate" | "today" = "dueDate") =>
     t.mutation(api.workspace.setNodeCompletion, {
-      ownerKey, nodeId, intent: "complete", completionMode: "dueDate", expectedRevision: (await get(nodeId)).revision ?? 0,
+      ownerKey, nodeId, intent: "complete", completionMode, expectedRevision: (await get(nodeId)).revision ?? 0,
     });
+  const setBasis = (basis: "dueDate" | "today" | null) =>
+    t.mutation(api.workspace.setRecurrenceBasis, { ownerKey, nodeId: source, basis });
   const activeCopiesUnder = async (parentNodeId: Id<"nodes">) =>
     (await all()).filter((n) => !n.archived && n.parentNodeId === parentNodeId && (n.sourceMeta as Meta | undefined)?.sourceTaskNodeId === source);
   const pastWeeksCopies = async () => {
@@ -68,7 +71,7 @@ async function setup(sourceDueAt: number, frequency: unknown = { interval: 4, un
     const pastWeeks = pages.find((p) => p.title === "Past Weeks");
     return (await all()).filter((n) => n.pageId === pastWeeks?._id && (n.sourceMeta as Meta | undefined)?.sourceTaskNodeId === source);
   };
-  return { t, get, pageId, days, focus, source, copyUnder, complete, activeCopiesUnder, pastWeeksCopies };
+  return { t, get, pageId, days, focus, source, copyUnder, complete, setBasis, activeCopiesUnder, pastWeeksCopies };
 }
 
 describe("planner copy of a recurring sidebar task", () => {
@@ -122,5 +125,54 @@ describe("planner copy of a recurring sidebar task", () => {
     expect(await s.complete(s.source)).toMatchObject({ status: "applied", route: "recurring" });
     expect((await s.get(s.source)).dueAt).toBe(nov(5));
     expect((await s.activeCopiesUnder(s.days.get(5)!)).length).toBe(1);
+  });
+});
+
+describe("the source task's own completion basis", () => {
+  // Source due Oct 20, every 4 days; today is Nov 2. "dueDate" -> Nov 5
+  // (first date after today on the Oct 20 cadence), "today" -> Nov 6.
+  const cases = [
+    { basis: "today" as const, workspace: "dueDate" as const, expected: 6 },
+    { basis: "dueDate" as const, workspace: "today" as const, expected: 5 },
+    { basis: null, workspace: "today" as const, expected: 6 },
+    { basis: null, workspace: "dueDate" as const, expected: 5 },
+  ];
+  for (const { basis, workspace, expected } of cases) {
+    for (const where of ["day", "focus"] as const) {
+      test(`${where} link, source basis ${basis ?? "unset"}, workspace ${workspace}: next is Nov ${expected}`, async () => {
+        const s = await setup(oct(20));
+        if (basis) await s.setBasis(basis);
+        const copy = await s.copyUnder(where === "day" ? s.days.get(2)! : s.focus, nov(2));
+        await s.complete(copy, workspace);
+        expect((await s.get(s.source)).dueAt).toBe(nov(expected));
+        expect((await s.activeCopiesUnder(s.days.get(expected)!)).length).toBe(1);
+        expect((await s.get(copy)).archived).toBe(true);
+      });
+    }
+  }
+
+  test("completing the source directly uses its own basis too", async () => {
+    const s = await setup(oct(20));
+    await s.setBasis("today");
+    expect(await s.complete(s.source, "dueDate")).toMatchObject({ route: "recurring" });
+    expect((await s.get(s.source)).dueAt).toBe(nov(6));
+  });
+
+  test("clearing the basis falls back to the workspace setting", async () => {
+    const s = await setup(oct(20));
+    await s.setBasis("today");
+    await s.setBasis(null);
+    expect(((await s.get(s.source)).sourceMeta as Meta).recurrenceBasis).toBeUndefined();
+    await s.complete(s.source, "dueDate");
+    expect((await s.get(s.source)).dueAt).toBe(nov(5));
+  });
+
+  test("a basis on the planner copy is ignored; the source's wins", async () => {
+    const s = await setup(oct(20));
+    await s.setBasis("dueDate");
+    const copy = await s.copyUnder(s.days.get(2)!, nov(2));
+    await s.t.mutation(api.workspace.setRecurrenceBasis, { ownerKey, nodeId: copy, basis: "today" });
+    await s.complete(copy, "today");
+    expect((await s.get(s.source)).dueAt).toBe(nov(5));
   });
 });

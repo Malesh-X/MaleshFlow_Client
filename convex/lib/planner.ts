@@ -30,6 +30,7 @@ import {
 } from "../../lib/domain/planner";
 import {
   advanceRecurringDueDateRange,
+  completionModeFor,
   parseRecurrenceFrequency,
   type RecurringCompletionMode,
 } from "../../lib/domain/recurrence";
@@ -533,7 +534,8 @@ async function syncPlannerLinkedSourceTaskCompletion(
         dueAt: sourceTask.dueAt,
         dueEndAt: sourceTask.dueEndAt ?? null,
         frequency: recurrenceFrequency,
-        mode: completionMode,
+        // The source's own basis, not the planner copy's.
+        mode: completionModeFor(sourceTask, completionMode),
         timeZone: await workspaceTimeZoneFor(ctx.db, sourceTask),
         skipPast: true,
       });

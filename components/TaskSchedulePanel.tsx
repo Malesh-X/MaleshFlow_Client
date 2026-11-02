@@ -23,7 +23,9 @@ type TaskSchedulePanelProps = {
   dueTime: string | null;
   dueTimeZone: string | null;
   recurrenceFrequency: RecurrenceFrequency;
+  // The task's own completion basis, or the workspace default when it has none.
   recurringCompletionMode: RecurringCompletionMode;
+  // Sets this task's own basis (saved right away).
   onRecurringCompletionModeChange: (mode: RecurringCompletionMode) => void;
   // Workspace time zone for date math (recurring roll-forward, planner days).
   workspaceTimeZone?: string | null;
@@ -65,6 +67,13 @@ export function TaskSchedulePanel({
   const [recurrenceModeDraft, setRecurrenceModeDraft] = useState<RecurrencePreset | "custom" | "">("");
   const [customIntervalDraft, setCustomIntervalDraft] = useState("");
   const [customUnitDraft, setCustomUnitDraft] = useState<RecurrenceUnit>("day");
+  // Saved right away on change; shown immediately while the save lands.
+  const [basisDraft, setBasisDraft] = useState(recurringCompletionMode);
+  useEffect(() => setBasisDraft(recurringCompletionMode), [recurringCompletionMode]);
+  const changeBasis = (mode: RecurringCompletionMode) => {
+    setBasisDraft(mode);
+    onRecurringCompletionModeChange(mode);
+  };
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -335,15 +344,15 @@ export function TaskSchedulePanel({
 
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-              When a recurring task is completed
+              When this task is completed
             </p>
             <div className="mt-3 space-y-3">
               <label className="flex cursor-pointer items-start gap-3 border border-[var(--workspace-border)] px-3 py-3 transition hover:border-[var(--workspace-accent)]">
                 <input
                   type="radio"
                   name="recurring-completion-mode"
-                  checked={recurringCompletionMode === "dueDate"}
-                  onChange={() => onRecurringCompletionModeChange("dueDate")}
+                  checked={basisDraft === "dueDate"}
+                  onChange={() => changeBasis("dueDate")}
                   className="mt-1"
                 />
                 <span>
@@ -359,8 +368,8 @@ export function TaskSchedulePanel({
                 <input
                   type="radio"
                   name="recurring-completion-mode"
-                  checked={recurringCompletionMode === "today"}
-                  onChange={() => onRecurringCompletionModeChange("today")}
+                  checked={basisDraft === "today"}
+                  onChange={() => changeBasis("today")}
                   className="mt-1"
                 />
                 <span>

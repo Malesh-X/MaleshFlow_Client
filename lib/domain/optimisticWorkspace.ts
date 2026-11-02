@@ -3,6 +3,7 @@ import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
 import {
   advanceRecurringDueDateRange,
+  completionModeFor,
   parseRecurrenceFrequency,
   type RecurrenceFrequency,
 } from "@/lib/domain/recurrence";
@@ -976,7 +977,7 @@ export function applyOptimisticNodeCompletion(
         dueAt: node.dueAt,
         dueEndAt: node.dueEndAt ?? null,
         frequency: recurrenceFrequency,
-        mode: args.completionMode,
+        mode: completionModeFor(node, args.completionMode),
         skipPast: true,
       });
       return applyNodeUpdatePatch(node, { taskStatus: "todo", dueAt: nextRange.dueAt, dueEndAt: nextRange.dueEndAt });

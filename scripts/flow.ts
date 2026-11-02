@@ -63,11 +63,12 @@ const COMMANDS: Record<string, Spec> = {
   },
   update: {
     args: ["nodeId"],
-    flags: ["text", "status", "due", "due-end", "time", "priority", "recur", "task", "note", "mode"],
+    flags: ["text", "status", "due", "due-end", "time", "priority", "recur", "recur-basis", "task", "note", "mode"],
     usage:
       "update <nodeId> [--text t] [--status todo|done] [--due YYYY-MM-DD|none] [--due-end YYYY-MM-DD|none]\n" +
       "                [--time HH:MM|none] [--priority low|medium|high|none]\n" +
-      "                [--recur daily|weekly|monthly|yearly|<n>d|<n>w|<n>m|<n>y|none] [--task|--note]",
+      "                [--recur daily|weekly|monthly|yearly|<n>d|<n>w|<n>m|<n>y|none] [--task|--note]\n" +
+      "                [--recur-basis dueDate|today|none]  (this task's completion basis; none = workspace setting)",
   },
   done: {
     args: ["nodeId"],
@@ -563,7 +564,7 @@ async function main() {
     case "update": {
       const nodeId = rest[0];
       const status = oneOf("status", ["todo", "done"] as const);
-      const editFlags = ["text", "due", "due-end", "time", "priority", "recur", "task", "note"].filter((name) => flags[name] !== undefined);
+      const editFlags = ["text", "due", "due-end", "time", "priority", "recur", "recur-basis", "task", "note"].filter((name) => flags[name] !== undefined);
       if (str("mode") && status !== "done") fail("--mode only applies with --status done.");
       if (status === "done") {
         // Same path as `done`, so completion routing runs and a done item stays done.
@@ -576,6 +577,7 @@ async function main() {
       const dueAt = parseDue(str("due"));
       const dueEndAt = parseDue(str("due-end"));
       const recur = parseRecur(str("recur"));
+      const recurBasis = oneOf("recur-basis", ["dueDate", "today", "none"] as const);
 
       const { node } = await loadActiveNode(nodeId);
       const nextKind = flags.task ? "task" : flags.note ? "note" : node.kind;
@@ -608,7 +610,11 @@ async function main() {
       if (dueEndAt !== undefined) args.dueEndAt = dueEndAt;
       Object.assign(args, time);
       if (recur !== undefined) args.recurrenceFrequency = recur;
-      await mutation("workspace:updateNode", args);
+      if (recurBasis && nextKind !== "task") fail("--recur-basis is for tasks.");
+      if (Object.keys(args).length > 1) await mutation("workspace:updateNode", args);
+      if (recurBasis) {
+        await mutation("workspace:setRecurrenceBasis", { nodeId, basis: recurBasis === "none" ? null : recurBasis });
+      }
       return ok();
     }
     case "done":

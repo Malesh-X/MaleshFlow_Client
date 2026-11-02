@@ -81,6 +81,7 @@ import {
 } from "../lib/domain/embeddings";
 import {
   advanceRecurringDueDateRange,
+  completionModeFor,
   parseRecurrenceFrequency,
   type RecurringCompletionMode,
 } from "../lib/domain/recurrence";
@@ -5460,7 +5461,7 @@ async function completeTaskPageTaskCore(
         dueAt: node.dueAt,
         dueEndAt: node.dueEndAt ?? null,
         frequency: recurrenceFrequency,
-        mode: completionMode,
+        mode: completionModeFor(node, completionMode),
         timeZone: await workspaceTimeZoneFor(ctx.db, node),
         skipPast: true,
       });
@@ -5670,7 +5671,7 @@ async function runNodeCompletion(ctx: MutationCtx, args: CompletionArgs) {
       dueAt: node.dueAt,
       dueEndAt: node.dueEndAt ?? null,
       frequency,
-      mode: args.completionMode,
+      mode: completionModeFor(node, args.completionMode),
       timeZone: await workspaceTimeZoneFor(ctx.db, node),
       skipPast: true,
     });
@@ -5744,6 +5745,33 @@ export const setNodeCompletion = mutation({
     );
     const inline = result.receipt && result.receiptId && INLINE_RECEIPT_ROUTES.has(result.route);
     return { ...result, receipt: inline ? { ...result.receipt!, receiptId: result.receiptId as string } : null };
+  },
+});
+
+// Sets a recurring item's own completion basis ("dueDate" or "today"; null
+// clears it, so the workspace setting applies). Completions use it instead of
+// the workspace setting; planner copies use their source's.
+export const setRecurrenceBasis = mutation({
+  args: {
+    ownerKey: v.string(),
+    nodeId: v.id("nodes"),
+    basis: v.union(v.literal("dueDate"), v.literal("today"), v.null()),
+  },
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setRecurrenceBasis");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const node = await assertNodeEditable(ctx, args.nodeId, "schedule");
+    if (!node) {
+      throw new ConvexError("Item not found.");
+    }
+    const sourceMeta: Record<string, unknown> = { ...getNodeSourceMeta(node) };
+    if (args.basis === null) {
+      delete sourceMeta.recurrenceBasis;
+    } else {
+      sourceMeta.recurrenceBasis = args.basis;
+    }
+    await ctx.db.patch(node._id, { sourceMeta, updatedAt: getTimestamp() });
+    return { basis: args.basis };
   },
 });
 
