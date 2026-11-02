@@ -205,6 +205,24 @@ describe("checked undo", () => {
   });
 });
 
+describe("redo replays the original intent", () => {
+  test("complete, reopen, undo the reopen, redo: the task ends up reopened", async () => {
+    const { t, get, complete, undo, redo, page, add } = await setup();
+    const pageId = await page("Plain", "Notes", "note");
+    const task = await add(pageId, "Task", { kind: "task", taskStatus: "todo" });
+    await complete(task);
+    const reopened = await t.mutation(api.workspace.setNodeCompletion, {
+      ownerKey, nodeId: task, intent: "reopen", completionMode: "dueDate", expectedRevision: (await get(task))!.revision ?? 0,
+    });
+    expect(reopened.status).toBe("applied");
+    expect((await get(task))!.taskStatus).toBe("todo");
+    await undo(reopened.receiptId);
+    expect((await get(task))!.taskStatus).toBe("done");
+    await redo(reopened.receiptId);
+    expect((await get(task))!.taskStatus).toBe("todo");
+  });
+});
+
 describe("chains", () => {
   test("complete the same recurring task twice, undo twice, then redo twice: every step passes", async () => {
     const { get, meta, complete, undo, redo, page, add } = await setup();

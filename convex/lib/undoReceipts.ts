@@ -40,6 +40,7 @@ export type ReceiptAction = {
   targetNodeId: Id<"nodes">;
   completionMode: RecurringCompletionMode;
   plannerPageId?: Id<"pages">;
+  intent?: "complete" | "reopen";
 };
 
 type ReceiptRow = Doc<"undoReceipts">;
@@ -352,7 +353,7 @@ export async function redoStoredReceipt(
   } finally {
     tracker.stop();
   }
-  if (!receipt) refuse("Can't redo this completion: the item is already done or can't be completed now. Nothing was redone.");
+  if (!receipt) refuse("Can't redo this completion: the item is already that way or can't be changed now. Nothing was redone.");
   const captured = await captureApplied(ctx, receipt, tracker.writes);
   await rewriteChain(ctx, row, "undone", new Map(captured.expect.map((entry) => [entry.nodeId, entry.revision])));
   await ctx.db.patch(row._id, { state: "applied", receipt, ...captured, updatedAt: Date.now() });

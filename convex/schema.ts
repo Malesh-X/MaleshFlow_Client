@@ -427,6 +427,9 @@ export default defineSchema({
     targetNodeId: v.id("nodes"),
     completionMode: v.union(v.literal("dueDate"), v.literal("today")),
     plannerPageId: v.optional(v.id("pages")),
+    // What the completion asked for; redo replays it. Unset on receipts from
+    // before it was stored, which were all "complete".
+    intent: v.optional(v.union(v.literal("complete"), v.literal("reopen"))),
     // "applied": undo is next; "undone": redo is next.
     state: v.union(v.literal("applied"), v.literal("undone")),
     // PlannerCompletionReceipt (lib/domain/planner.ts).

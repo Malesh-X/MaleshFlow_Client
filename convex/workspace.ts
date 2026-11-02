@@ -5292,6 +5292,7 @@ export const setNodeCompletion = mutation({
         action: "completion",
         targetNodeId: args.nodeId,
         completionMode: args.completionMode,
+        intent: args.intent,
         ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
       },
       () =>
@@ -5400,7 +5401,7 @@ export const undoCompletion = mutation({
 
 // Checked redo of undone receipts, in the order given: the items must still
 // be the way the undo left them, then the completion runs again with its
-// original mode (and planner). All or nothing, like undoCompletion.
+// original intent, mode (and planner). All or nothing, like undoCompletion.
 export const redoCompletion = mutation({
   args: {
     ownerKey: v.string(),
@@ -5431,7 +5432,7 @@ async function rerunReceiptAction(ctx: MutationCtx, row: Doc<"undoReceipts">) {
   }
   const result = await runNodeCompletion(ctx, {
     nodeId: row.targetNodeId,
-    intent: "complete",
+    intent: row.intent ?? "complete",
     completionMode: row.completionMode,
     expectedRevision: target.revision ?? 0,
     ...(row.plannerPageId ? { plannerPageId: row.plannerPageId } : {}),
