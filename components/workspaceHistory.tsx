@@ -165,7 +165,18 @@ type SetNodeTreesArchivedBatchFn = (args: {
   archived: boolean;
 }) => Promise<unknown>;
 
-type CompletionReceiptFn = (args: { ownerKey: string; receiptIds: string[] }) => Promise<unknown>;
+// A write this tab made to an item, as workspace:updateNode reports it.
+type OwnWrite = { nodeId: Id<"nodes">; revisionBefore: number; revision: number };
+
+function asOwnWrite(value: unknown): OwnWrite | null {
+  if (!value || typeof value !== "object") return null;
+  const write = value as Partial<OwnWrite>;
+  return typeof write.nodeId === "string" && typeof write.revisionBefore === "number" && typeof write.revision === "number"
+    ? (write as OwnWrite)
+    : null;
+}
+
+type CompletionReceiptFn = (args: { ownerKey: string; receiptIds: string[]; ownWrites?: OwnWrite[] }) => Promise<unknown>;
 
 type UseWorkspaceHistoryArgs = {
   ownerKey: string;
@@ -319,6 +330,8 @@ export function useWorkspaceHistoryController({
   const [isApplyingHistory, setIsApplyingHistory] = useState(false);
   const undoStackRef = useRef<HistoryEntry[]>([]);
   const redoStackRef = useRef<HistoryEntry[]>([]);
+  // The text writes a compound step's last undo made, for its next redo.
+  const compoundUndoWritesRef = useRef(new WeakMap<HistoryEntry, OwnWrite[]>());
   const editorsRef = useRef(new Map<string, EditorAdapter>());
   const draftSessionsRef = useRef(new Map<string, DraftSession>());
   const pendingFocusEditorIdRef = useRef<string | null>(null);
@@ -613,7 +626,8 @@ export function useWorkspaceHistoryController({
   }, [flushDraftCheckpoint]);
 
   const applyHistoryEntry = useCallback(
-    async (entry: HistoryEntry, direction: "undo" | "redo") => {
+    // `ownWrites` collects this tab's item writes within one compound step.
+    async (entry: HistoryEntry, direction: "undo" | "redo", ownWrites: OwnWrite[] = []) => {
       const isUndo = direction === "undo";
       const entryPageId = getEntryPageId(entry);
       if (
@@ -657,7 +671,7 @@ export function useWorkspaceHistoryController({
 
         case "update_node": {
           const nextSnapshot = isUndo ? entry.before : entry.after;
-          await updateNode({
+          const write = await updateNode({
             ownerKey,
             nodeId: entry.nodeId,
             text: nextSnapshot.text,
@@ -670,6 +684,8 @@ export function useWorkspaceHistoryController({
             dueTimeZone: nextSnapshot.dueTimeZone,
             recurrenceFrequency: nextSnapshot.recurrenceFrequency,
           });
+          const ownWrite = asOwnWrite(write);
+          if (ownWrite) ownWrites.push(ownWrite);
           syncCommittedValue(entry.focusEditorId, nextSnapshot.text, {
             kind: "node",
             pageId: entry.pageId,
@@ -724,7 +740,14 @@ export function useWorkspaceHistoryController({
         case "completion_receipt": {
           // Undo newest first; redo in the original order.
           const receiptIds = isUndo ? [...entry.receiptIds].reverse() : entry.receiptIds;
-          await (isUndo ? undoCompletion : redoCompletion)({ ownerKey, receiptIds });
+          if (isUndo) {
+            await undoCompletion({ ownerKey, receiptIds });
+          } else {
+            // In a compound step (a text edit, then the completion), this
+            // tab's own text writes since the completion undo don't count as
+            // changes; anyone else's still make the redo refuse.
+            await redoCompletion({ ownerKey, receiptIds, ...(ownWrites.length ? { ownWrites: [...ownWrites] } : {}) });
+          }
           scheduleFocus(entry.focusEditorId);
           return;
         }
@@ -760,8 +783,16 @@ export function useWorkspaceHistoryController({
             ? [...entry.entries].reverse()
             : entry.entries;
 
+          // Undo runs the completion undo before the text undo, so the next
+          // redo needs both the text undo's write and the text redo's.
+          const compoundWrites = isUndo ? [] : [...(compoundUndoWritesRef.current.get(entry) ?? [])];
           for (const child of orderedEntries) {
-            await applyHistoryEntry(child, direction);
+            await applyHistoryEntry(child, direction, compoundWrites);
+          }
+          if (isUndo) {
+            compoundUndoWritesRef.current.set(entry, compoundWrites);
+          } else {
+            compoundUndoWritesRef.current.delete(entry);
           }
 
           scheduleFocus(isUndo ? entry.focusAfterUndoId : entry.focusAfterRedoId);

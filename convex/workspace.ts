@@ -5406,13 +5406,18 @@ export const redoCompletion = mutation({
   args: {
     ownerKey: v.string(),
     receiptIds: v.array(v.string()),
+    // Writes the caller made itself since the undo, as updateNode reported
+    // them (a history step that redoes a text edit before the completion).
+    ownWrites: v.optional(
+      v.array(v.object({ nodeId: v.id("nodes"), revisionBefore: v.number(), revision: v.number() })),
+    ),
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:redoCompletion");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const results = [];
     for (const receiptId of args.receiptIds) {
-      results.push(await redoStoredReceipt(ctx, receiptId, (row) => rerunReceiptAction(ctx, row)));
+      results.push(await redoStoredReceipt(ctx, receiptId, (row) => rerunReceiptAction(ctx, row), args.ownWrites ?? []));
     }
     return results;
   },
@@ -6053,6 +6058,14 @@ export const updateNode = mutation({
       }
       await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
     }
+    // The revision this write moved the item from and to. The app passes it
+    // to redoCompletion when a history step redoes a text edit and then a
+    // completion of the same item (see redoStoredReceipt's ownWrites).
+    return {
+      nodeId: args.nodeId,
+      revisionBefore: node.revision ?? 0,
+      revision: (await ctx.db.get(args.nodeId))?.revision ?? 0,
+    };
   },
 });
 

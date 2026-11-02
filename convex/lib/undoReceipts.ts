@@ -161,12 +161,32 @@ async function pruneOldReceipts(ctx: MutationCtx, now: number) {
 
 // ---- checks ----
 
-async function receiptProblems(ctx: MutationCtx, row: ReceiptRow, options: { membership: boolean }) {
+// A write the caller made itself since the receipt's last transition, as
+// updateNode reports it.
+export type OwnWrite = { nodeId: Id<"nodes">; revisionBefore: number; revision: number };
+
+// The revision `expected` becomes after the caller's own writes to that item,
+// followed in order. A write that didn't start where the last one ended (some
+// other edit came in between) stops the chain, so that edit is still caught.
+function afterOwnWrites(nodeId: Id<"nodes">, expected: number, ownWrites: readonly OwnWrite[]) {
+  let revision = expected;
+  for (const write of ownWrites) {
+    if (write.nodeId === nodeId && write.revisionBefore === revision) revision = write.revision;
+  }
+  return revision;
+}
+
+async function receiptProblems(
+  ctx: MutationCtx,
+  row: ReceiptRow,
+  options: { membership: boolean; ownWrites?: readonly OwnWrite[] },
+) {
   const reasons: string[] = [];
   for (const entry of row.expect) {
     const node = await ctx.db.get(entry.nodeId);
+    const expected = afterOwnWrites(entry.nodeId, entry.revision, options.ownWrites ?? []);
     if (!node) reasons.push(`${label(entry.text)} was deleted`);
-    else if ((node.revision ?? 0) !== entry.revision) reasons.push(`${label(node.text)} was changed`);
+    else if ((node.revision ?? 0) !== expected) reasons.push(`${label(node.text)} was changed`);
   }
   if (!options.membership) return reasons;
   for (const subtree of row.subtrees) {
@@ -333,17 +353,19 @@ export async function undoStoredReceipt(ctx: MutationCtx, rawId: string) {
   return { status: "undone" as const, receiptId: row._id, nodeId: row.targetNodeId };
 }
 
-// Checked redo: the items must still be the way the undo left them; then the
-// completion runs again (`rerun`, with the stored mode and planner) and the
-// same receipt records what it did this time.
+// Checked redo: the items must still be the way the undo left them, apart
+// from the caller's own writes since (`ownWrites`); then the completion runs
+// again (`rerun`, with the stored intent, mode and planner) and the same
+// receipt records what it did this time.
 export async function redoStoredReceipt(
   ctx: MutationCtx,
   rawId: string,
   rerun: (row: ReceiptRow) => Promise<PlannerCompletionReceipt | null>,
+  ownWrites: readonly OwnWrite[] = [],
 ) {
   const row = await loadReceipt(ctx, rawId);
   if (row.state !== "undone") refuse("That completion hasn't been undone, so there is nothing to redo.");
-  const reasons = await receiptProblems(ctx, row, { membership: false });
+  const reasons = await receiptProblems(ctx, row, { membership: false, ownWrites });
   if (reasons.length) refuse(refusalMessage("redo", reasons));
 
   const tracker = trackNodeWrites(ctx);

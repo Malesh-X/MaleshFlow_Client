@@ -446,3 +446,87 @@ test("a failed completion undo keeps the step and says so", { concurrency: false
   cleanup();
   dom.window.close();
 });
+
+// A text edit and a completion in one step: undo runs the completion undo,
+// then the text undo; redo runs the text redo, then the completion redo with
+// both of this tab's text writes, so the server doesn't take them for an edit
+// from elsewhere.
+type OwnWriteArg = { nodeId: string; revisionBefore: number; revision: number };
+function CompoundHarness({ calls }: { calls: string[]; }) {
+  const revision = useRef(5);
+  const redoArgs = useRef<OwnWriteArg[] | undefined>(undefined);
+  const [redoWrites, setRedoWrites] = useState("");
+  const snapshot = (text: string): NodeValueSnapshot => ({ text, kind: "task", taskStatus: "todo", noteCompleted: false });
+  const history = useWorkspaceHistoryController({
+    ownerKey: "owner",
+    selectedPageId: PAGE_ONE,
+    setSelectedPageId: () => undefined,
+    renamePage: async () => undefined,
+    updateNode: async ({ nodeId, text }) => {
+      calls.push(`text:${text}`);
+      revision.current += 1;
+      return { nodeId, revisionBefore: revision.current - 1, revision: revision.current };
+    },
+    moveNode: async () => undefined,
+    setNodeTreeArchived: async () => undefined,
+    setNodeTreesArchivedBatch: async () => undefined,
+    undoCompletion: async () => {
+      calls.push("undoCompletion");
+      revision.current += 1;
+      return null;
+    },
+    redoCompletion: async ({ ownWrites }) => {
+      calls.push("redoCompletion");
+      redoArgs.current = ownWrites;
+      setRedoWrites(JSON.stringify(ownWrites ?? null));
+      return null;
+    },
+  });
+  const pushed = useRef(false);
+  useEffect(() => {
+    if (pushed.current) return;
+    pushed.current = true;
+    history.pushUndoEntry({
+      type: "compound",
+      pageId: PAGE_ONE,
+      entries: [
+        { type: "update_node", pageId: PAGE_ONE, nodeId: NODE_ONE, before: snapshot("Draft"), after: snapshot("Draft, edited"), focusEditorId: "editor" },
+        { type: "completion_receipt", pageId: PAGE_ONE, receiptIds: ["r1"], focusEditorId: null },
+      ],
+      focusAfterUndoId: null,
+      focusAfterRedoId: null,
+    });
+  }, [history]);
+  return (
+    <div>
+      <button data-testid="undo" onClick={() => void history.undo()}>
+        Undo
+      </button>
+      <button data-testid="redo" onClick={() => void history.redo()}>
+        Redo
+      </button>
+      <div data-testid="counts">{`${history.canUndo}/${history.canRedo}`}</div>
+      <div data-testid="redo-writes">{redoWrites}</div>
+    </div>
+  );
+}
+
+test("redoing a text edit plus completion passes this tab's text writes to the completion redo", { concurrency: false }, async () => {
+  const dom = installDom();
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls: string[] = [];
+  const view = render(<CompoundHarness calls={calls} />);
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
+  await user.click(view.getByTestId("undo"));
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "false/true"));
+  await user.click(view.getByTestId("redo"));
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
+  assert.deepEqual(calls, ["undoCompletion", "text:Draft", "text:Draft, edited", "redoCompletion"]);
+  // Completion undo left revision 6; the text undo wrote 6 -> 7, the text redo 7 -> 8.
+  assert.deepEqual(JSON.parse(view.getByTestId("redo-writes").textContent ?? "null"), [
+    { nodeId: NODE_ONE, revisionBefore: 6, revision: 7 },
+    { nodeId: NODE_ONE, revisionBefore: 7, revision: 8 },
+  ]);
+  cleanup();
+  dom.window.close();
+});
