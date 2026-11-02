@@ -151,6 +151,38 @@ describe("double completion", () => {
   }
 });
 
+describe("same-page planner preview", () => {
+  test("a sidebar task completed through its preview in a planner day completes the planner copy and advances the source", async () => {
+    const { t, get, complete, page, add } = await setup();
+    const pageId = await page("Plan", "Tasks", "planner");
+    await t.mutation(api.planner.ensurePlannerPageSections, { ownerKey, pageId });
+    const dayId = (await t.run(async (ctx) => appendPlannerDayCore(ctx, { page: (await ctx.db.get(pageId))!, plannerDate: day(2) })))
+      .dayNodeId as Id<"nodes">;
+    const sidebar = (await t.run((ctx) => ctx.db.query("nodes").collect())).find(
+      (n) => n.pageId === pageId && (n.sourceMeta as Record<string, unknown> | undefined)?.sectionSlot === "plannerSidebar",
+    )!._id;
+    const source = await add(pageId, "Daily", { kind: "task", taskStatus: "todo", dueAt: day(2), recurrenceFrequency: "daily", parentNodeId: sidebar });
+    const copy = (await t.run(async (ctx) =>
+      appendPlannerLinkedTaskCopy(ctx, {
+        plannerPageId: pageId,
+        parentNodeId: dayId,
+        plannerDate: day(2),
+        sourceTask: { ...(await ctx.db.get(source))!, dueEndAt: null },
+        afterNodeId: null,
+      }),
+    )) as Id<"nodes">;
+
+    const result = await complete(source, "complete", { plannerPageId: pageId });
+    expect(result).toMatchObject({ status: "applied", route: "plannerPreview" });
+    const copyAfter = await get(copy);
+    expect(copyAfter.taskStatus).toBe("done");
+    expect(copyAfter.archived).toBe(true);
+    const sourceAfter = await get(source);
+    expect(sourceAfter.dueAt).toBe(day(3));
+    expect((sourceAfter.sourceMeta as Record<string, unknown>).occurrenceIndex).toBe(1);
+  });
+});
+
 describe("app callers", () => {
   test("the page tree the app loads carries each item's revision", async () => {
     const { t, get, page, add } = await setup();

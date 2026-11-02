@@ -5183,8 +5183,10 @@ async function runNodeCompletion(ctx: MutationCtx, args: CompletionArgs) {
   }
 
   // A source task shown in a planner preview: complete the planner's copy of
-  // it. With no copy in that planner, fall through to the normal routing.
-  if (args.plannerPageId && args.plannerPageId !== node.pageId && args.intent === "complete" && node.kind === "task") {
+  // it. This holds when the source lives on that planner page too (a sidebar
+  // task previewed in a planner day). With no copy in that planner, fall
+  // through to the normal routing.
+  if (args.plannerPageId && args.intent === "complete" && node.kind === "task") {
     await assertPageWritable(ctx, args.plannerPageId);
     const preview = await completePlannerSourceTaskInstance(ctx, {
       plannerPageId: args.plannerPageId,
