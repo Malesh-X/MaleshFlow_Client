@@ -2,6 +2,8 @@
 // No Convex imports, so they run in plain unit tests.
 // See Phase 2 of docs/server-logic-plan.md.
 
+import { isNodeLocked } from "../../lib/domain/workspaceRules";
+
 export type GuardMode = "record" | "enforce";
 
 // "record": a violation is logged to the guardViolations table and the write
@@ -21,12 +23,8 @@ type MetaHolder = { sourceMeta?: unknown } | null | undefined;
 const metaOf = (value: MetaHolder): Record<string, unknown> =>
   value && typeof value.sourceMeta === "object" && value.sourceMeta ? (value.sourceMeta as Record<string, unknown>) : {};
 
-// Same rule as isNodeLocked in components/WorkspaceApp.tsx.
-export function isLockedNode(node: MetaHolder) {
-  const meta = metaOf(node);
-  if (meta.locked !== true) return false;
-  return typeof meta.sectionSlot === "string" || meta.plannerKind === "plannerDay";
-}
+// Section headers and planner days (shared with the app and CLI).
+export const isLockedNode = isNodeLocked;
 
 export type PageLike = { archived: boolean; sourceMeta?: unknown } | null | undefined;
 

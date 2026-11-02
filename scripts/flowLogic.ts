@@ -1,11 +1,21 @@
 // Pure helpers for scripts/flow.ts (no I/O, so they can be unit tested).
-//
-// Several of these mirror private functions in components/WorkspaceApp.tsx
-// (getPageMeta, isNodeLocked, the handleCreatePage section map, the kind
-// toggle). They aren't exported from the app, and the CLI must not change the
-// app, so they are copied here with a pointer to the original. Phase 3 of
-// docs/server-logic-plan.md moves these rules into Convex and removes the copies.
+// Workspace rules (page types, locks, planner items, kind toggle) come from
+// lib/domain/workspaceRules.ts, the same module the app and server use.
 import { dateInputValueToTimestamp, timestampToDateInputValue } from "../lib/domain/recurrence";
+import { getNodeMeta, getPageMeta, pageTypeForSection, type PageType, type SidebarSection } from "../lib/domain/workspaceRules";
+
+export {
+  SIDEBAR_SECTIONS,
+  getPageMeta,
+  isNodeCompleted,
+  isNodeLocked,
+  isPlannerCompletionItem,
+  isPlannerLinkedTaskCopy,
+  kindChangeArgs,
+  pageTypeForSection,
+  type PageType,
+  type SidebarSection,
+} from "../lib/domain/workspaceRules";
 
 export type TreeNode = {
   _id: string;
@@ -25,34 +35,9 @@ export type TreeNode = {
 
 export type PageDoc = { _id: string; title: string; archived?: boolean; sourceMeta?: Record<string, unknown> | null };
 
-export const SIDEBAR_SECTIONS = ["Models", "Tasks", "Notes", "Views", "Templates", "Journal", "Scratchpads"] as const;
-export type SidebarSection = (typeof SIDEBAR_SECTIONS)[number];
-export type PageType = "default" | "note" | "task" | "planner" | "model" | "journal" | "scratchpad" | "multiPage";
-
-export const metaOf = (value: { sourceMeta?: unknown } | null | undefined): Record<string, unknown> =>
-  value && typeof value.sourceMeta === "object" && value.sourceMeta ? (value.sourceMeta as Record<string, unknown>) : {};
+export const metaOf = getNodeMeta;
 
 // ---- pages ----
-
-// Mirrors the section -> pageType map in handleCreatePage (WorkspaceApp.tsx).
-export function pageTypeForSection(section: SidebarSection): PageType {
-  switch (section) {
-    case "Models":
-      return "model";
-    case "Tasks":
-      return "task";
-    case "Notes":
-      return "note";
-    case "Views":
-      return "multiPage";
-    case "Journal":
-      return "journal";
-    case "Scratchpads":
-      return "scratchpad";
-    default:
-      return "default";
-  }
-}
 
 // Arguments for workspace:createPage, matching what the app sends.
 export function createPageArgs(title: string, section: SidebarSection, type?: "planner") {
@@ -63,27 +48,6 @@ export function createPageArgs(title: string, section: SidebarSection, type?: "p
     pageType: pageTypeForSection(section),
     ...(section === "Journal" ? { addToLatestJournalView: true } : {}),
   };
-}
-
-// Mirrors getPageMeta in WorkspaceApp.tsx.
-export function getPageMeta(page: { sourceMeta?: unknown } | null | undefined): { pageType: PageType; sidebarSection: SidebarSection } {
-  const meta = metaOf(page);
-  const isSidebarPage = meta.specialPage === "sidebar";
-  const pageType: PageType = isSidebarPage
-    ? "note"
-    : meta.pageType === "planner" || meta.pageType === "model" || meta.pageType === "journal" || meta.pageType === "scratchpad" || meta.pageType === "multiPage"
-      ? (meta.pageType as PageType)
-      : meta.pageType === "note" || meta.sidebarSection === "Notes"
-        ? "note"
-        : meta.pageType === "task" || meta.sidebarSection === "Tasks"
-          ? "task"
-          : "default";
-  const sidebarSection: SidebarSection = SIDEBAR_SECTIONS.includes(meta.sidebarSection as SidebarSection)
-    ? (meta.sidebarSection as SidebarSection)
-    : isSidebarPage
-      ? "Notes"
-      : ({ model: "Models", planner: "Tasks", journal: "Journal", scratchpad: "Scratchpads", multiPage: "Views", note: "Notes" } as Partial<Record<PageType, SidebarSection>>)[pageType] ?? "Tasks";
-  return { pageType, sidebarSection };
 }
 
 // Where a new item goes when `add` has no --parent: the page's main section
@@ -130,37 +94,6 @@ export function isUntypedSectionPage(page: PageDoc) {
 }
 
 // ---- nodes ----
-
-// Mirrors isNodeLocked in WorkspaceApp.tsx: section headers and planner days.
-export function isNodeLocked(node: { sourceMeta?: unknown } | null | undefined) {
-  const meta = metaOf(node);
-  if (meta.locked !== true) return false;
-  return typeof meta.sectionSlot === "string" || meta.plannerKind === "plannerDay";
-}
-
-export function isNodeCompleted(node: TreeNode) {
-  return node.kind === "task" ? node.taskStatus === "done" : metaOf(node).noteCompleted === true;
-}
-
-// Mirrors isPlannerLinkedTaskCopy / isPlannerCompletionItem in WorkspaceApp.tsx.
-export function isPlannerLinkedTaskCopy(node: TreeNode) {
-  const meta = metaOf(node);
-  return meta.plannerKind === "plannerLinkedTask" && typeof meta.sourceTaskNodeId === "string" && meta.sourceTaskNodeId.length > 0;
-}
-export function isPlannerCompletionItem(node: TreeNode, nodeMap: Map<string, TreeNode>) {
-  if (isPlannerLinkedTaskCopy(node)) return true;
-  let parentId = node.parentNodeId;
-  const seen = new Set<string>();
-  while (parentId && !seen.has(parentId)) {
-    seen.add(parentId);
-    const parent = nodeMap.get(parentId);
-    if (!parent) return false;
-    const meta = metaOf(parent);
-    if (meta.plannerKind === "plannerDay" || meta.sectionSlot === "plannerFocus" || isPlannerLinkedTaskCopy(parent)) return true;
-    parentId = parent.parentNodeId;
-  }
-  return false;
-}
 
 // Ids of every node under rootId (not including rootId).
 export function collectDescendantIds(nodes: TreeNode[], rootId: string) {
@@ -235,20 +168,6 @@ export function scheduleForDue(dueAt: number | null, existing: { dueEndAt?: numb
   if (dueAt === null) return { dueAt: null, dueEndAt: null, dueTime: null, dueTimeZone: null, recurrenceFrequency: null };
   const endAt = existing.dueEndAt ?? null;
   return { dueAt, ...(endAt !== null && endAt <= dueAt ? { dueEndAt: null } : {}) };
-}
-
-// What the app's task/note toggle sends (WorkspaceApp.tsx, toggle kind).
-export function kindChangeArgs(node: TreeNode, kind: "task" | "note") {
-  if (node.kind === kind) return { kind, lockKind: true };
-  return {
-    kind,
-    lockKind: true,
-    taskStatus: kind === "task" ? "todo" : null,
-    noteCompleted: false,
-    dueAt: null,
-    dueEndAt: null,
-    recurrenceFrequency: null,
-  };
 }
 
 // ---- doctor checks (read-only) ----

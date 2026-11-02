@@ -304,7 +304,7 @@ async function completeLikeApp(nodeId: string) {
   const isSidebarPage = pageMeta.specialPage === "sidebar";
   const isTaskPage = !isSidebarPage && getPageMeta(page).pageType === "task";
 
-  if (isPlannerCompletionItem(node, nodeMap)) {
+  if (isPlannerCompletionItem(node, (id) => nodeMap.get(id))) {
     // Planner day/focus items: completing the last open item archives the day to Past Weeks.
     console.error(`Planner item on "${page.title}": using planner:completePlannerTask.`);
     await mutation("planner:completePlannerTask", { plannerNodeId: nodeId, completionMode });

@@ -131,7 +131,8 @@ test("isPlannerCompletionItem finds planner day ancestors and stops on cycles", 
   const plain = node();
   const a = node({ parentNodeId: "loopB" });
   const b = { ...node({ parentNodeId: a._id }), _id: "loopB" };
-  const map = new Map([day, item, child, plain, a, b].map((n) => [n._id, n]));
+  const nodeMap = new Map([day, item, child, plain, a, b].map((n) => [n._id, n]));
+  const map = (id: string) => nodeMap.get(id);
   assert.equal(isPlannerCompletionItem(item, map), true);
   assert.equal(isPlannerCompletionItem(child, map), true);
   assert.equal(isPlannerCompletionItem(plain, map), false);

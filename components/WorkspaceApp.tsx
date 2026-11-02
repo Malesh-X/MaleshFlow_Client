@@ -77,6 +77,17 @@ import {
 } from "@/lib/domain/recurrence";
 import { resolveTimeZone } from "@/lib/domain/timeZone";
 import {
+  SIDEBAR_SECTIONS,
+  getNodeMeta,
+  getPageMeta,
+  isNodeLocked,
+  isPlannerCompletionItem as sharedIsPlannerCompletionItem,
+  isPlannerLinkedTaskCopy,
+  pageTypeForSection,
+  type PageType,
+  type SidebarSection,
+} from "@/lib/domain/workspaceRules";
+import {
   applySelectedLinkShortcut,
   convertHtmlClipboardToMarkdownText,
   extractLinkMatches,
@@ -164,15 +175,6 @@ import type { ChatPlan } from "@/lib/domain/chat";
 import type { ImportedOutlineNode } from "@/lib/domain/importer";
 
 const SKIP = "skip" as const;
-const SIDEBAR_SECTIONS = [
-  "Models",
-  "Tasks",
-  "Notes",
-  "Views",
-  "Templates",
-  "Journal",
-  "Scratchpads",
-] as const;
 const OWNER_KEY_STORAGE_KEY = "maleshflow-owner-key";
 const OWNER_KEY_EVENT = "maleshflow-owner-key-change";
 const LAST_PAGE_STORAGE_KEY = "maleshflow-last-page-id";
@@ -345,16 +347,6 @@ function areWorkspaceTextBoxesEqual(left: string[], right: string[]) {
   return left.every((value, index) => value === right[index]);
 }
 
-type SidebarSection = (typeof SIDEBAR_SECTIONS)[number];
-type PageType =
-  | "default"
-  | "note"
-  | "task"
-  | "planner"
-  | "model"
-  | "journal"
-  | "scratchpad"
-  | "multiPage";
 type PageDoc = Doc<"pages">;
 type PageTreeResult = {
   page: PageDoc;
@@ -1478,52 +1470,6 @@ class WorkspaceErrorBoundary extends Component<
   }
 }
 
-function getPageMeta(page: Doc<"pages"> | null | undefined) {
-  const sourceMeta =
-    page && typeof page.sourceMeta === "object" && page.sourceMeta
-      ? (page.sourceMeta as Record<string, unknown>)
-      : {};
-  const isSidebarPage = sourceMeta.specialPage === "sidebar";
-
-  const pageType: PageType =
-    isSidebarPage
-      ? "note"
-      : sourceMeta.pageType === "planner"
-      ? "planner"
-      : sourceMeta.pageType === "model"
-      ? "model"
-      : sourceMeta.pageType === "journal"
-        ? "journal"
-        : sourceMeta.pageType === "scratchpad"
-          ? "scratchpad"
-          : sourceMeta.pageType === "multiPage"
-            ? "multiPage"
-          : sourceMeta.pageType === "note" || sourceMeta.sidebarSection === "Notes"
-            ? "note"
-          : sourceMeta.pageType === "task" || sourceMeta.sidebarSection === "Tasks"
-            ? "task"
-          : "default";
-  const sidebarSection = SIDEBAR_SECTIONS.includes(sourceMeta.sidebarSection as SidebarSection)
-    ? (sourceMeta.sidebarSection as SidebarSection)
-    : isSidebarPage
-      ? "Notes"
-      : pageType === "model"
-      ? "Models"
-      : pageType === "planner"
-      ? "Tasks"
-      : pageType === "journal"
-        ? "Journal"
-        : pageType === "scratchpad"
-          ? "Scratchpads"
-          : pageType === "multiPage"
-            ? "Views"
-          : pageType === "note"
-            ? "Notes"
-            : "Tasks";
-
-  return { sidebarSection, pageType };
-}
-
 function isSidebarSpecialPage(page: Doc<"pages"> | null | undefined) {
   const sourceMeta =
     page && typeof page.sourceMeta === "object" && page.sourceMeta
@@ -1811,26 +1757,6 @@ function collectEmbeddedMultiPageNodeExpandableNodeIds(tree: TreeNode[]) {
   return rootNode ? collectExpandableNodeIds(rootNode.children) : [];
 }
 
-function getNodeMeta(node: { sourceMeta?: unknown } | null | undefined) {
-  if (!node || typeof node.sourceMeta !== "object" || !node.sourceMeta) {
-    return {};
-  }
-
-  return node.sourceMeta as Record<string, unknown>;
-}
-
-function isNodeLocked(node: { sourceMeta?: unknown } | null | undefined) {
-  const sourceMeta = getNodeMeta(node);
-  if (sourceMeta.locked !== true) {
-    return false;
-  }
-
-  return (
-    typeof sourceMeta.sectionSlot === "string" ||
-    sourceMeta.plannerKind === "plannerDay"
-  );
-}
-
 function isPlannerDayTitleNode(node: { sourceMeta?: unknown } | null | undefined) {
   const sourceMeta = getNodeMeta(node);
   return (
@@ -1838,15 +1764,6 @@ function isPlannerDayTitleNode(node: { sourceMeta?: unknown } | null | undefined
     (sourceMeta.sourceType === "system" &&
       sourceMeta.locked === true &&
       typeof sourceMeta.plannerDate === "number")
-  );
-}
-
-function isPlannerLinkedTaskCopy(node: { sourceMeta?: unknown } | null | undefined) {
-  const sourceMeta = getNodeMeta(node);
-  return (
-    sourceMeta.plannerKind === "plannerLinkedTask" &&
-    typeof sourceMeta.sourceTaskNodeId === "string" &&
-    sourceMeta.sourceTaskNodeId.length > 0
   );
 }
 
@@ -1877,34 +1794,11 @@ function isPlannerCompletionItem(
     | Map<string, Pick<Doc<"nodes">, "_id" | "parentNodeId" | "sourceMeta" | "kind">>
     | Map<string, Pick<TreeNode, "_id" | "parentNodeId" | "sourceMeta" | "kind">>,
 ) {
-  if (!node) {
-    return false;
-  }
-
-  if (isPlannerLinkedTaskCopy(node)) {
-    return true;
-  }
-
-  let currentParentId = (node.parentNodeId as string | null) ?? null;
-  while (currentParentId) {
-    const parentNode = nodeMap.get(currentParentId) ?? null;
-    if (!parentNode) {
-      return false;
-    }
-
-    const parentMeta = getNodeMeta(parentNode);
-    if (
-      parentMeta.plannerKind === "plannerDay" ||
-      parentMeta.sectionSlot === "plannerFocus" ||
-      isPlannerLinkedTaskCopy(parentNode)
-    ) {
-      return true;
-    }
-
-    currentParentId = (parentNode.parentNodeId as string | null) ?? null;
-  }
-
-  return false;
+  const lookup = nodeMap as Map<string, { parentNodeId?: string | null; sourceMeta?: unknown }>;
+  return sharedIsPlannerCompletionItem(
+    node as { parentNodeId?: string | null; sourceMeta?: unknown } | null | undefined,
+    (id) => lookup.get(id),
+  );
 }
 
 function isNodeNoteCompleted(
@@ -8558,20 +8452,7 @@ function ConfiguredWorkspace({
   const handleCreatePage = useCallback(async (section: SidebarSection) => {
     setIsCreatingPage(section);
     try {
-      const pageType: PageType =
-        section === "Models"
-          ? "model"
-          : section === "Tasks"
-            ? "task"
-          : section === "Notes"
-            ? "note"
-          : section === "Views"
-            ? "multiPage"
-          : section === "Journal"
-            ? "journal"
-            : section === "Scratchpads"
-              ? "scratchpad"
-              : "default";
+      const pageType: PageType = pageTypeForSection(section);
       const title =
         section === "Models"
           ? "Untitled Model"
