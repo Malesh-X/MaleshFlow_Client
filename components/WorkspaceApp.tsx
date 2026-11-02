@@ -761,8 +761,8 @@ type InsertNodeAboveArgs = Parameters<
   ReturnType<typeof useMutation<typeof api.workspace.insertNodeAbove>>
 >[0];
 type SplitNodeArgs = Parameters<ReturnType<typeof useMutation<typeof api.workspace.splitNode>>>[0];
-type MoveNodeTreesToPageArgs = Parameters<
-  ReturnType<typeof useMutation<typeof api.workspace.moveNodeTreesToPage>>
+type MoveNodeTreeArgs = Parameters<
+  ReturnType<typeof useMutation<typeof api.workspace.moveNodeTree>>
 >[0];
 type UpdateNodeMutation = (args: UpdateNodeArgs) => Promise<unknown>;
 type CreateNodesBatchMutation = (args: CreateNodesBatchArgs) => Promise<Doc<"nodes">[]>;
@@ -4694,7 +4694,7 @@ function ConfiguredWorkspace({
   const refreshSidebarLinks = useMutation(api.workspace.refreshSidebarLinks);
   const cancelEmbeddingRebuild = useMutation(api.workspace.cancelEmbeddingRebuild);
   const createNodesBatchRaw = useMutation(api.workspace.createNodesBatch);
-  const moveNodeTreesToPageRaw = useMutation(api.workspace.moveNodeTreesToPage);
+  const moveNodeTreeRaw = useMutation(api.workspace.moveNodeTree);
   const insertNodeAboveRaw = useMutation(api.workspace.insertNodeAbove);
   const updateNodeRaw = useMutation(api.workspace.updateNode);
   const updateNodesBatchRaw = useMutation(api.workspace.updateNodesBatch);
@@ -4752,6 +4752,22 @@ function ConfiguredWorkspace({
       applyOptimisticNodeMoves(localStore, args);
     },
   );
+  const moveNodeTreeMutation = moveNodeTreeRaw.withOptimisticUpdate((localStore, args) => {
+    // Only a placed move (cut and paste) can be shown before the server
+    // answers; "append at the end" waits for the result.
+    if (args.afterNodeId === undefined) {
+      return;
+    }
+    applyOptimisticNodeMoves(localStore, {
+      ownerKey: args.ownerKey,
+      moves: args.nodeIds.map((nodeId, index) => ({
+        nodeId,
+        pageId: args.pageId,
+        parentNodeId: args.parentNodeId,
+        afterNodeId: index === 0 ? args.afterNodeId : args.nodeIds[index - 1]!,
+      })),
+    });
+  });
   const setNodeTreeArchivedMutation = setNodeTreeArchivedRaw.withOptimisticUpdate(
     (localStore, args) => {
       if (!args.archived) {
@@ -4919,19 +4935,20 @@ function ConfiguredWorkspace({
       ),
     [runTrackedMutation, setNodeTreesArchivedBatchMutation],
   );
-  const moveNodeTreesToPage = useCallback(
-    (args: MoveNodeTreesToPageArgs) =>
+  // Whole-branch move (workspace:moveNodeTree): move-to-page and cut and paste.
+  const moveNodeTree = useCallback(
+    (args: MoveNodeTreeArgs) =>
       runTrackedMutation(
-        () => moveNodeTreesToPageRaw(args),
+        () => moveNodeTreeMutation(args),
         {
-          pageIds: [args.targetPageId],
+          pageIds: args.pageId ? [args.pageId] : [],
           nodeIds: args.nodeIds,
         },
         args.nodeIds.length === 1
           ? "Could not move that item."
           : "Could not move those items.",
       ),
-    [moveNodeTreesToPageRaw, runTrackedMutation],
+    [moveNodeTreeMutation, runTrackedMutation],
   );
   const createNodesBatch = useCallback(
     (args: CreateNodesBatchArgs) =>
@@ -6494,9 +6511,10 @@ function ConfiguredWorkspace({
       const movedNodeIds = pendingPalettePageAction.nodeIds.map(
         (nodeId) => nodeId as Id<"nodes">,
       );
-      await moveNodeTreesToPage({
+      await moveNodeTree({
         ownerKey,
-        targetPageId,
+        pageId: targetPageId,
+        parentNodeId: null,
         nodeIds: movedNodeIds,
       });
       setPaletteOpen(false);
@@ -6520,7 +6538,7 @@ function ConfiguredWorkspace({
     },
     [
       clearNodeSelection,
-      moveNodeTreesToPage,
+      moveNodeTree,
       ownerKey,
       pagesById,
       pendingPalettePageAction,
@@ -6786,15 +6804,14 @@ function ConfiguredWorkspace({
       }
     }
 
-    const moves = pendingCutClipboard.nodeIds.map((nodeId, index) => ({
-      nodeId,
+    // One whole-branch move, so children cut from another page come along.
+    await moveNodeTree({
+      ownerKey,
+      nodeIds: pendingCutClipboard.nodeIds,
       pageId: anchorNode.pageId as Id<"pages">,
       parentNodeId: (anchorNode.parentNodeId as Id<"nodes"> | null) ?? null,
-      afterNodeId: index === 0
-        ? (anchorNode._id as Id<"nodes">)
-        : pendingCutClipboard.nodeIds[index - 1]!,
-    }));
-    await executeNodeMoveBatch(moves);
+      afterNodeId: anchorNode._id as Id<"nodes">,
+    });
 
     pendingCutClipboardRef.current = null;
     setCopySnackbarMessage(
@@ -6803,7 +6820,8 @@ function ConfiguredWorkspace({
     return true;
   }, [
     executeNodeArchiveBatch,
-    executeNodeMoveBatch,
+    moveNodeTree,
+    ownerKey,
     selectSingleNode,
     selectedNodeIds,
     visibleNodeOrder,

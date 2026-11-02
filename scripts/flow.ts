@@ -619,25 +619,16 @@ async function main() {
       const error = validateParent({ nodeId, parentId: parent ?? null, targetNodes, descendantIds: descendants });
       if (error) fail(`--parent: ${error}`);
 
-      if (crossPage) {
-        // Re-pages the whole branch and appends it at the destination's root, like the app's "Move to page".
-        await mutation("workspace:moveNodeTreesToPage", { targetPageId, nodeIds: [nodeId] });
-        if (!parent && afterNodeId === undefined) return ok();
-        // Then place it within the destination page (the branch is already there).
-        await mutation("workspace:moveNode", {
-          nodeId,
-          parentNodeId: parent ?? null,
-          afterNodeId: afterNodeId !== undefined ? afterNodeId : lastChildId(targetNodes, parent ?? null, nodeId),
-        });
-        return ok();
-      }
-      const nextParent = parent === undefined ? node.parentNodeId : parent;
-      await mutation("workspace:moveNode", {
-        nodeId,
-        parentNodeId: nextParent,
-        afterNodeId: afterNodeId !== undefined ? afterNodeId : lastChildId(nodes, nextParent, nodeId),
+      // One whole-branch move (workspace:moveNodeTree, the same mutation as the
+      // app's cut and paste): children, links and favorites come along, and
+      // without --after it lands at the end of the destination.
+      const result = await mutation("workspace:moveNodeTree", {
+        nodeIds: [nodeId],
+        pageId: targetPageId,
+        parentNodeId: parent === undefined ? (crossPage ? null : node.parentNodeId) : parent,
+        ...(afterNodeId !== undefined ? { afterNodeId } : {}),
       });
-      return ok();
+      return ok(result);
     }
     case "archive": {
       const info = (await resolveNodes([rest[0]])).get(rest[0]) ?? fail("Node not found.");

@@ -6690,6 +6690,162 @@ export const replaceNodeAndInsertSiblings = mutation({
   },
 });
 
+// Moves an item together with its whole branch (Phase 3, change 3). Every
+// move goes through here: the new workspace:moveNodeTree and the older
+// moveNode, moveNodesBatch and moveNodeTreesToPage. When the page changes, all
+// descendants move with it, their links are re-synced and sidebar favorites
+// pointing at them follow, so nothing is left behind on the old page.
+//
+// `strict` (moveNodeTree) refuses a move that would break the tree even while
+// the guards only record: a missing or archived destination page, a parent
+// that is missing, archived, on another page, the item itself or inside it.
+async function moveNodeTreeCore(
+  ctx: MutationCtx,
+  args: {
+    nodeId: Id<"nodes">;
+    pageId?: Id<"pages">;
+    parentNodeId?: Id<"nodes"> | null;
+    afterNodeId?: Id<"nodes"> | null;
+    strict: boolean;
+  },
+  cache: ReturnType<typeof createSiblingListCache>,
+  touchedPageIds: Set<Id<"pages">>,
+) {
+  const node = await ctx.db.get(args.nodeId);
+  if (!node) {
+    throw new ConvexError("Item not found.");
+  }
+  if (args.strict && node.archived) {
+    throw new ConvexError("That item is archived; unarchive it first.");
+  }
+  const parentNodeId =
+    args.parentNodeId === undefined ? (node.parentNodeId ?? null) : args.parentNodeId;
+  let pageId = args.pageId ?? node.pageId;
+  if (args.strict && args.pageId === undefined && parentNodeId) {
+    // A parent alone names the destination page.
+    pageId = (await ctx.db.get(parentNodeId))?.pageId ?? pageId;
+  }
+
+  await assertNodeEditable(ctx, node, "move");
+  if (pageId !== node.pageId) {
+    const page = await assertPageWritable(ctx, pageId);
+    if (args.strict && (!page || page.archived)) {
+      throw new ConvexError("Choose an active page as the destination.");
+    }
+  }
+  const parentProblem = await assertValidParent(ctx, { nodeId: node._id, parentNodeId, pageId });
+  if (args.strict && parentProblem) {
+    throw new ConvexError(parentProblem);
+  }
+
+  const now = getTimestamp();
+  const pageChanged = pageId !== node.pageId;
+  // Read the branch before the root moves: children are found by page.
+  const branch = pageChanged ? await collectNodeTree(ctx.db, node._id) : [node];
+  const position = await computeNodePositionCached(ctx.db, cache, pageId, parentNodeId, args.afterNodeId);
+  await ctx.db.patch(node._id, { pageId, parentNodeId, position, updatedAt: now });
+  applyNodeMoveToSiblingCache(cache, node, pageId, parentNodeId, position);
+  touchedPageIds.add(node.pageId);
+  touchedPageIds.add(pageId);
+
+  if (!pageChanged) {
+    await enqueueNodeEmbeddingRefresh(ctx, node._id);
+    return node._id;
+  }
+
+  for (const descendant of branch) {
+    if (descendant._id !== node._id) {
+      await ctx.db.patch(descendant._id, { pageId, updatedAt: now });
+    }
+  }
+  for (const moved of branch) {
+    const favorites = await ctx.db
+      .query("sidebarFavorites")
+      .withIndex("by_target", (query) =>
+        query.eq("targetKind", "node").eq("targetPageId", moved.pageId).eq("targetNodeId", moved._id),
+      )
+      .take(20);
+    for (const favorite of favorites) {
+      await ctx.db.patch(favorite._id, { targetPageId: pageId, updatedAt: now });
+    }
+    const refreshed = await ctx.db.get(moved._id);
+    if (refreshed) {
+      await syncLinksForNode(ctx.db, refreshed);
+      await enqueueNodeEmbeddingRefresh(ctx, refreshed._id);
+    }
+  }
+  return node._id;
+}
+
+// Drops ids that sit inside another listed item's branch: moving the branch
+// already carries them.
+async function topLevelNodeIds(ctx: MutationCtx, nodeIds: Id<"nodes">[]) {
+  const listed = new Set<string>(nodeIds);
+  const result: Id<"nodes">[] = [];
+  for (const nodeId of nodeIds) {
+    let cursor = (await ctx.db.get(nodeId))?.parentNodeId ?? null;
+    let inside = false;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      if (listed.has(cursor)) {
+        inside = true;
+        break;
+      }
+      seen.add(cursor);
+      cursor = (await ctx.db.get(cursor))?.parentNodeId ?? null;
+    }
+    if (!inside && !result.includes(nodeId)) {
+      result.push(nodeId);
+    }
+  }
+  return result;
+}
+
+// One move for the app's cut and paste, move-to-page and the CLI's `move`:
+// the listed items (each with its whole branch) land in order under
+// `parentNodeId` on `pageId`, after `afterNodeId`, or at the end when it is
+// left out. A parent alone names the page; a page alone puts them at its top
+// level. Revisions bump on every moved item.
+export const moveNodeTree = mutation({
+  args: {
+    ownerKey: v.string(),
+    nodeIds: v.array(v.id("nodes")),
+    pageId: v.optional(v.id("pages")),
+    parentNodeId: v.optional(nullableNodeIdValidator),
+    afterNodeId: v.optional(nullableNodeIdValidator),
+  },
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:moveNodeTree");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const nodeIds = await topLevelNodeIds(ctx, args.nodeIds);
+    const cache = createSiblingListCache();
+    const touchedPageIds = new Set<Id<"pages">>();
+    let afterNodeId = args.afterNodeId;
+    for (const nodeId of nodeIds) {
+      const node = await ctx.db.get(nodeId);
+      // Moving to another page without a parent: its top level.
+      const parentNodeId =
+        args.parentNodeId === undefined && args.pageId !== undefined && node && args.pageId !== node.pageId
+          ? null
+          : args.parentNodeId;
+      await moveNodeTreeCore(
+        ctx,
+        { nodeId, pageId: args.pageId, parentNodeId, afterNodeId, strict: true },
+        cache,
+        touchedPageIds,
+      );
+      afterNodeId = nodeId;
+    }
+    for (const pageId of touchedPageIds) {
+      await enqueuePageRootEmbeddingRefresh(ctx, pageId);
+    }
+    const first = nodeIds[0] ? await ctx.db.get(nodeIds[0]) : null;
+    return { movedNodeIds: nodeIds, pageId: first?.pageId ?? null };
+  },
+});
+
+// Older single move (drag and drop, indent, outdent, history undo). Same
+// whole-branch logic; afterNodeId null still means "first".
 export const moveNode = mutation({
   args: {
     ownerKey: v.string(),
@@ -6701,37 +6857,20 @@ export const moveNode = mutation({
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:moveNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    const node = await ctx.db.get(args.nodeId);
-    if (!node) {
-      throw new Error("Node not found.");
-    }
-
-    const previousPageId = node.pageId;
-    const pageId = args.pageId ?? node.pageId;
-    const parentNodeId =
-      args.parentNodeId === undefined ? node.parentNodeId : args.parentNodeId;
-    await assertNodeEditable(ctx, node, "move");
-    if (pageId !== node.pageId) {
-      await assertPageWritable(ctx, pageId);
-    }
-    await assertValidParent(ctx, { nodeId: args.nodeId, parentNodeId, pageId });
-    const position = await computeNodePosition(
-      ctx.db,
-      pageId,
-      parentNodeId,
-      args.afterNodeId ?? null,
+    const touchedPageIds = new Set<Id<"pages">>();
+    await moveNodeTreeCore(
+      ctx,
+      {
+        nodeId: args.nodeId,
+        pageId: args.pageId,
+        parentNodeId: args.parentNodeId,
+        afterNodeId: args.afterNodeId ?? null,
+        strict: false,
+      },
+      createSiblingListCache(),
+      touchedPageIds,
     );
-
-    await ctx.db.patch(args.nodeId, {
-      pageId,
-      parentNodeId,
-      position,
-      updatedAt: getTimestamp(),
-    });
-
-    await enqueueNodeEmbeddingRefresh(ctx, args.nodeId);
-    await enqueuePageRootEmbeddingRefresh(ctx, previousPageId);
-    if (pageId !== previousPageId) {
+    for (const pageId of touchedPageIds) {
       await enqueuePageRootEmbeddingRefresh(ctx, pageId);
     }
   },
@@ -6761,41 +6900,19 @@ export const moveNodesBatch = mutation({
     // re-collecting it per move made batch moves into large parents exceed
     // Convex's per-execution document read limit.
     const siblingCache = createSiblingListCache();
-
     for (const move of args.moves) {
-      const node = await ctx.db.get(move.nodeId);
-      if (!node) {
-        throw new Error("Node not found.");
-      }
-
-      const previousPageId = node.pageId;
-      const pageId = move.pageId ?? node.pageId;
-      const parentNodeId =
-        move.parentNodeId === undefined ? node.parentNodeId : move.parentNodeId;
-      await assertNodeEditable(ctx, node, "move");
-      if (pageId !== node.pageId) {
-        await assertPageWritable(ctx, pageId);
-      }
-      await assertValidParent(ctx, { nodeId: move.nodeId, parentNodeId, pageId });
-      const position = await computeNodePositionCached(
-        ctx.db,
+      await moveNodeTreeCore(
+        ctx,
+        {
+          nodeId: move.nodeId,
+          pageId: move.pageId,
+          parentNodeId: move.parentNodeId,
+          afterNodeId: move.afterNodeId ?? null,
+          strict: false,
+        },
         siblingCache,
-        pageId,
-        parentNodeId,
-        move.afterNodeId ?? null,
+        touchedPageIds,
       );
-
-      await ctx.db.patch(move.nodeId, {
-        pageId,
-        parentNodeId,
-        position,
-        updatedAt: getTimestamp(),
-      });
-      applyNodeMoveToSiblingCache(siblingCache, node, pageId, parentNodeId, position);
-
-      touchedPageIds.add(previousPageId);
-      touchedPageIds.add(pageId);
-      await enqueueNodeEmbeddingRefresh(ctx, move.nodeId);
     }
 
     for (const pageId of touchedPageIds) {
@@ -6837,6 +6954,8 @@ export const reorderNode = mutation({
   },
 });
 
+// Older move-to-page (kept for open tabs): appends the branches at the end
+// of the page's top level.
 export const moveNodeTreesToPage = mutation({
   args: {
     ownerKey: v.string(),
@@ -6857,65 +6976,24 @@ export const moveNodeTreesToPage = mutation({
       throw new Error("Choose an active page as the destination.");
     }
 
-    const now = getTimestamp();
     const touchedPageIds = new Set<Id<"pages">>([args.targetPageId]);
-    const existingTargetRoots = (await listSiblingNodes(
-      ctx.db,
-      args.targetPageId,
-      null,
-    )).sort((left, right) => left.position - right.position);
-    let afterNodeId =
-      ((existingTargetRoots[existingTargetRoots.length - 1]?._id as Id<"nodes"> | undefined) ??
-        null);
-
+    const cache = createSiblingListCache();
+    let afterNodeId: Id<"nodes"> | undefined = undefined;
     for (const nodeId of args.nodeIds) {
       const node = await ctx.db.get(nodeId);
       if (!node || node.archived) {
         throw new Error("Node not found.");
       }
-
-      await assertNodeEditable(ctx, node, "move");
       const page = await ctx.db.get(node.pageId);
       if (!page || page.archived) {
         throw new Error("Cannot move items from an archived page.");
       }
-
-      const subtree = await collectNodeTree(ctx.db, nodeId);
-      if (subtree.length === 0) {
-        continue;
-      }
-
-      touchedPageIds.add(node.pageId);
-      const nextPosition = await computeNodePosition(
-        ctx.db,
-        args.targetPageId,
-        null,
-        afterNodeId,
+      await moveNodeTreeCore(
+        ctx,
+        { nodeId, pageId: args.targetPageId, parentNodeId: null, afterNodeId, strict: false },
+        cache,
+        touchedPageIds,
       );
-
-      await ctx.db.patch(nodeId, {
-        pageId: args.targetPageId,
-        parentNodeId: null,
-        position: nextPosition,
-        updatedAt: now,
-      });
-
-      for (const descendant of subtree) {
-        if (descendant._id === nodeId) {
-          continue;
-        }
-        await ctx.db.patch(descendant._id, {
-          pageId: args.targetPageId,
-          updatedAt: now,
-        });
-      }
-
-      const refreshedSubtree = await collectNodeTree(ctx.db, nodeId);
-      for (const movedNode of refreshedSubtree) {
-        await syncLinksForNode(ctx.db, movedNode);
-        await enqueueNodeEmbeddingRefresh(ctx, movedNode._id);
-      }
-
       afterNodeId = nodeId;
     }
 

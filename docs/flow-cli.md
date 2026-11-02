@@ -70,7 +70,7 @@ Convex login. Never print, log or commit the key. The CLI replaces it with
 | &nbsp;&nbsp;`--task` / `--note` | Change the node kind like the app's toggle: locks the kind (so AI tagging won't flip it back) and resets status, dates and recurrence. Not allowed on section headers or planner days. |
 | `done <nodeId> [--mode dueDate\|today]` | Complete an item exactly like the app's checkbox (see below). `--mode` sets how recurring tasks roll forward (default `dueDate`, the app's default). Never reopens: an item that is already done is left alone. |
 | `move <nodeId>` | Move a node and its whole branch; appends at the end of the destination by default. Section headers and planner days can't be moved. |
-| &nbsp;&nbsp;`--page <pageId>` | Another page: re-pages the whole branch with `moveNodeTreesToPage` (like the app's "Move to page"), landing at the page root unless `--parent`/`--after` place it there. |
+| &nbsp;&nbsp;`--page <pageId>` | Another page: the whole branch moves with `workspace:moveNodeTree` (the app's "Move to page" and cut and paste use it too), with its links and sidebar favorites, landing at the end of the page's top level unless `--parent`/`--after` place it. |
 | &nbsp;&nbsp;`--parent <nodeId>\|root` | New parent, on the destination page. Refused if it's the item itself or inside it. |
 | &nbsp;&nbsp;`--after <nodeId>\|top` | Exact position among the new siblings (`--after <id>` also sets the parent). |
 | `archive <nodeId>` / `unarchive <nodeId>` | Hide or restore a node and its whole branch (`setNodeTreeArchived`, as in the app). Section headers and planner days can't be archived. Unarchive is refused when the parent is archived too; unarchive the parent instead. |

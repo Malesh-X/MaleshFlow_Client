@@ -168,6 +168,9 @@ export async function assertValidParent(
   if (problem) {
     await violation(ctx, "assertValidParent", problem, { nodeId: args.nodeId, pageId: args.pageId }, `parent ${args.parentNodeId}: ${problem}`);
   }
+  // Callers that must refuse a broken tree even in record mode (moveNodeTree)
+  // throw on this themselves.
+  return problem;
 }
 
 // Checks the schedule a write leaves behind (see checkSchedule). Returns the
