@@ -438,7 +438,16 @@ async function doctor() {
     report.strayItems.push({ pageId: page._id, pageTitle: page.title, nodeId: node._id, text: node.text, detail: `parent ${node.parentNodeId} ${why}${where}` });
   }
 
-  if (flags.json) return print(report);
+  // Writes the server guards flagged (record mode logs instead of refusing).
+  type GuardViolations = { mode: string; total: number; truncated: boolean; counts: Record<string, number>; recent: { mutation: string; guard: string; nodeId: string | null; pageId: string | null; detail: string; createdAt: number }[] };
+  let guards: GuardViolations | null = null;
+  try {
+    guards = (await query("guardViolations:list", { limit })) as GuardViolations;
+  } catch {
+    // Deployments without Phase 2 don't have this query yet.
+  }
+
+  if (flags.json) return print({ ...report, guardViolations: guards });
   const sections: [string, DoctorFinding[]][] = [
     ["Stray items (active, parent archived, missing or on another page)", report.strayItems],
     ["Pages under Models/Journal/Views/Scratchpads still typed default", report.untypedPages],
@@ -454,6 +463,12 @@ async function doctor() {
       console.log(`  - "${f.pageTitle}" (${f.pageId})${f.nodeId ? ` ${f.nodeId}: ${JSON.stringify(f.text.slice(0, 60))}` : ""}${f.detail ? ` [${f.detail}]` : ""}`);
     }
     if (findings.length > limit) console.log(`  ... and ${findings.length - limit} more (--limit or --json for all)`);
+  }
+  if (!guards) return console.log("Guard violations: not available (this deployment has no guardViolations:list yet)");
+  console.log(`Guard violations (server guards in ${guards.mode} mode): ${guards.total}${guards.truncated ? "+" : ""}`);
+  for (const [key, count] of Object.entries(guards.counts).sort((a, b) => b[1] - a[1])) console.log(`  ${count}  ${key}`);
+  for (const row of guards.recent.slice(0, limit)) {
+    console.log(`  - ${new Date(row.createdAt).toISOString()} ${row.mutation} ${row.guard}${row.nodeId ? ` node ${row.nodeId}` : ""}${row.pageId ? ` page ${row.pageId}` : ""}: ${row.detail}`);
   }
 }
 

@@ -4,6 +4,7 @@ import type { Doc } from "./_generated/dataModel";
 import { priorityValidator, taskStatusValidator } from "./lib/validators";
 import { isSeparatorLineText } from "../lib/domain/displaySyntax";
 import { linkSearchScore, normalizeLinkSearchQuery } from "../lib/domain/linkSearch";
+import { withGuards } from "./lib/guards";
 
 const TEXT_SEARCH_NODE_CANDIDATE_LIMIT = 128;
 const EXACT_TEXT_SEARCH_NODE_CANDIDATE_LIMIT = 512;
@@ -503,7 +504,8 @@ export const applyTaskMetadata = internalMutation({
     taskStatus: taskStatusValidator,
     priority: priorityValidator,
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "aiData:applyTaskMetadata");
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       return;

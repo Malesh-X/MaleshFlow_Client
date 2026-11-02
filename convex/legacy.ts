@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { assertOwnerKeyGuarded } from "./lib/authThrottle";
+import { withGuards } from "./lib/guards";
 
 const LEGACY_SEARCH_SNIPPET_RADIUS = 160;
 
@@ -77,7 +78,8 @@ export const generateLegacyUploadUrl = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "legacy:generateLegacyUploadUrl");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     return await ctx.storage.generateUploadUrl();
   },
@@ -92,7 +94,8 @@ export const registerLegacyFile = mutation({
     mimeType: v.optional(v.union(v.string(), v.null())),
     size: v.number(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "legacy:registerLegacyFile");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const extension = assertLegacyTextFile(args.fileName);
     const now = getTimestamp();

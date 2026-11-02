@@ -14,6 +14,7 @@ import {
   type TaskCalendarFeedEvent,
 } from "../lib/domain/calendar";
 import { extractLinks, getExplicitWikiLinkPreviewText } from "../lib/domain/links";
+import { withGuards } from "./lib/guards";
 
 const TASK_CALENDAR_FEED_KIND = "task_ics";
 
@@ -101,7 +102,8 @@ export const ensureTaskCalendarFeed = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "calendar:ensureTaskCalendarFeed");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const now = getTimestamp();
@@ -133,7 +135,8 @@ export const rotateTaskCalendarFeed = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "calendar:rotateTaskCalendarFeed");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const now = getTimestamp();

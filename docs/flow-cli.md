@@ -98,7 +98,8 @@ a plain task, use `update --status todo`.
 
 ### `doctor` checks
 
-`doctor` only reads (`listPages`, `getPageTree`, `resolveNodeLinks`) and never
+`doctor` only reads (`listPages`, `getPageTree`, `resolveNodeLinks`,
+`guardViolations:list`) and never
 writes, so it needs no `--yes`. It reports:
 
 | Check | Means |
@@ -109,6 +110,7 @@ writes, so it needs no `--yes`. It reports:
 | Recurring items with no due date | Recurrence set but nothing to roll forward from. |
 | End date not after the due date | `dueEndAt` on or before `dueAt`, or with no due date. |
 | Pages too large to check fully | The page tree was capped, so results for that page may be incomplete. |
+| Guard violations | Writes the server guards flagged (`guardViolations:list`), with counts per mutation and guard. In record mode (the default) a flagged write still goes through; see docs/server-logic-plan.md, Phase 2. |
 
 Repairs are a separate step that the owner approves (Phase 5 of
 docs/server-logic-plan.md).

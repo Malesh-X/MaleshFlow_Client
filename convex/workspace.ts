@@ -99,6 +99,14 @@ import {
   buildAiWorkingMemoryTextContext,
   normalizeAiWorkingMemoryText,
 } from "../lib/domain/aiMemory";
+import {
+  assertNodeEditable,
+  assertPageWritable,
+  assertValidParent,
+  normalizeSchedule,
+  withGuards,
+} from "./lib/guards";
+import { changeForUpdate } from "./lib/guardRules";
 
 function getTimestamp() {
   return Date.now();
@@ -1364,7 +1372,8 @@ export const archiveCompletedTaskPageRootIfReady = internalMutation({
   args: {
     nodeId: v.id("nodes"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:archiveCompletedTaskPageRootIfReady");
     const node = await ctx.db.get(args.nodeId);
     if (!node || node.archived || node.kind !== "task") {
       return {
@@ -2414,7 +2423,8 @@ export const setWorkspaceAiMemory = mutation({
     ownerKey: v.string(),
     text: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setWorkspaceAiMemory");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const text = normalizeWorkspaceAiMemoryText(args.text);
@@ -2472,7 +2482,8 @@ export const ensureSidebarPage = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureSidebarPage");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const pages = await ctx.db.query("pages").collect();
@@ -2518,7 +2529,8 @@ export const setWorkspaceInbox = mutation({
     ownerKey: v.string(),
     texts: v.array(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setWorkspaceInbox");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const texts = [...args.texts];
@@ -2584,7 +2596,8 @@ export const clearWorkspaceInbox = mutation({
     index: v.number(),
     text: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:clearWorkspaceInbox");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const pages = await ctx.db.query("pages").collect();
@@ -2724,7 +2737,8 @@ export const setWorkspaceRandomBox = mutation({
     ownerKey: v.string(),
     texts: v.array(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setWorkspaceRandomBox");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const texts = [...args.texts];
@@ -2788,7 +2802,8 @@ export const refreshSidebarLinks = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:refreshSidebarLinks");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const pages = await ctx.db.query("pages").collect();
@@ -2836,7 +2851,8 @@ export const checkOwnerKey = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:checkOwnerKey");
     return await recordOwnerKeyValidation(ctx.db, args.ownerKey);
   },
 });
@@ -2845,7 +2861,8 @@ export const rebuildEmbeddings = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:rebuildEmbeddings");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
     const runId = `${now}`;
@@ -2891,7 +2908,8 @@ export const cancelEmbeddingRebuild = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:cancelEmbeddingRebuild");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const state = await getEmbeddingRebuildState(ctx.db);
     if (!state || state.status !== "running") {
@@ -3509,7 +3527,8 @@ export const applyFindAndReplaceBatch = mutation({
     batchSize: v.optional(v.number()),
     updatedBefore: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:applyFindAndReplaceBatch");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     if (args.find.length === 0) {
@@ -3555,6 +3574,7 @@ export const applyFindAndReplaceBatch = mutation({
     const pageIdsToRefresh = new Set<Id<"pages">>();
 
     for (const replacement of replacements) {
+      await assertNodeEditable(ctx, replacement.nodeId, "text");
       await ctx.db.patch(replacement.nodeId, {
         text: replacement.text,
         updatedAt: getTimestamp(),
@@ -3591,7 +3611,8 @@ export const archivePage = mutation({
     pageId: v.id("pages"),
     archived: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:archivePage");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const page = await ctx.db.get(args.pageId);
     if (!page) {
@@ -3614,7 +3635,8 @@ export const deletePageForever = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:deletePageForever");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const page = await ctx.db.get(args.pageId);
     if (!page) {
@@ -4063,7 +4085,8 @@ export const replaceUnresolvedPageLinksWithTarget = mutation({
     ),
     batchSize: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:replaceUnresolvedPageLinksWithTarget");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     return await replaceUnresolvedPageLinksWithTargetBatch(ctx, args);
   },
@@ -4076,7 +4099,8 @@ export const replaceUnresolvedPageLinksWithNode = mutation({
     targetNodeId: v.id("nodes"),
     batchSize: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:replaceUnresolvedPageLinksWithNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     return await replaceUnresolvedPageLinksWithTargetBatch(ctx, {
       normalizedTitle: args.normalizedTitle,
@@ -4812,7 +4836,8 @@ export const createPage = mutation({
     ),
     addToLatestJournalView: v.optional(v.boolean()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:createPage");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
 
@@ -4970,7 +4995,8 @@ export const ensureTaskPageSidebarSection = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureTaskPageSidebarSection");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5030,7 +5056,8 @@ export const ensurePlannerPageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensurePlannerPageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5047,7 +5074,8 @@ export const ensureJournalPageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureJournalPageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5064,7 +5092,8 @@ export const ensureNotePageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureNotePageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5085,7 +5114,8 @@ export const ensureScratchpadPageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureScratchpadPageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5102,7 +5132,8 @@ export const ensureTemplatePageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureTemplatePageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5122,7 +5153,8 @@ export const ensureMultiPagePageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:ensureMultiPagePageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5140,8 +5172,10 @@ export const setPlannerScanExcluded = mutation({
     pageId: v.id("pages"),
     excluded: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setPlannerScanExcluded");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
 
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isTaskSourcePage(page)) {
@@ -5167,8 +5201,10 @@ export const setTaskPageDoneArchiveEnabled = mutation({
     pageId: v.id("pages"),
     enabled: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setTaskPageDoneArchiveEnabled");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
 
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isTaskSourcePage(page)) {
@@ -5194,8 +5230,10 @@ export const setPageDataDumpExcluded = mutation({
     pageId: v.id("pages"),
     excluded: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setPageDataDumpExcluded");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
 
     const page = await ctx.db.get(args.pageId);
     if (!page || isSidebarSpecialPage(page) || isPagePendingDeletion(page)) {
@@ -5226,8 +5264,10 @@ export const setNodeChildrenLinkAutocompleteHidden = mutation({
     nodeId: v.id("nodes"),
     hidden: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setNodeChildrenLinkAutocompleteHidden");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "other");
 
     const node = await ctx.db.get(args.nodeId);
     if (!node || node.archived) {
@@ -5258,8 +5298,12 @@ export const setNodeDataDumpExcluded = mutation({
     nodeIds: v.array(v.id("nodes")),
     excluded: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setNodeDataDumpExcluded");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    for (const nodeId of args.nodeIds) {
+      await assertNodeEditable(ctx, nodeId, "other");
+    }
 
     const uniqueNodeIds = [
       ...new Set(args.nodeIds.map((nodeId) => nodeId as string)),
@@ -5302,8 +5346,10 @@ export const completeTaskPageTask = mutation({
     nodeId: v.id("nodes"),
     completionMode: v.union(v.literal("dueDate"), v.literal("today")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:completeTaskPageTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "status");
 
     const node = await ctx.db.get(args.nodeId);
     if (!node || node.archived) {
@@ -5410,8 +5456,10 @@ export const forceArchiveTaskPageItem = mutation({
     ownerKey: v.string(),
     nodeId: v.id("nodes"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:forceArchiveTaskPageItem");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "archive");
 
     const node = await ctx.db.get(args.nodeId);
     if (!node || node.archived) {
@@ -5438,8 +5486,10 @@ export const setModelPageCustomPrompt = mutation({
     pageId: v.id("pages"),
     prompt: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setModelPageCustomPrompt");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
 
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived) {
@@ -5469,7 +5519,8 @@ export const setPagePinnedInAllSidebar = mutation({
     pageId: v.id("pages"),
     pinned: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setPagePinnedInAllSidebar");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5495,7 +5546,8 @@ export const mergePinnedPagesInAllSidebar = mutation({
     ownerKey: v.string(),
     pageIds: v.array(v.id("pages")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:mergePinnedPagesInAllSidebar");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const uniquePageIds = [...new Set(args.pageIds.map((pageId) => pageId as string))] as Id<"pages">[];
@@ -5533,7 +5585,8 @@ export const setSidebarFavorite = mutation({
     nodeId: v.optional(v.union(v.id("nodes"), v.null())),
     favorited: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setSidebarFavorite");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const page = await ctx.db.get(args.pageId);
@@ -5601,8 +5654,10 @@ export const renamePage = mutation({
     pageId: v.id("pages"),
     title: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:renamePage");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page) {
       throw new Error("Page not found.");
@@ -5697,10 +5752,13 @@ export const createNode = mutation({
     dueEndAt: v.optional(v.union(v.number(), v.null())),
     recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:createNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
     const parentNodeId = args.parentNodeId ?? null;
+    await assertPageWritable(ctx, args.pageId);
+    await assertValidParent(ctx, { nodeId: null, parentNodeId, pageId: args.pageId });
     const position = await computeNodePosition(
       ctx.db,
       args.pageId,
@@ -5710,7 +5768,7 @@ export const createNode = mutation({
     const text = args.text?.trim() || "";
     const kind = normalizeNodeKindForText(text, args.kind);
 
-    const nodeId = await ctx.db.insert("nodes", {
+    const nodeId = await ctx.db.insert("nodes", await normalizeSchedule(ctx, { before: null, pageId: args.pageId, write: {
       pageId: args.pageId,
       parentNodeId,
       position,
@@ -5727,7 +5785,7 @@ export const createNode = mutation({
       },
       createdAt: now,
       updatedAt: now,
-    });
+    } }));
 
     const node = await ctx.db.get(nodeId);
     if (node) {
@@ -5745,7 +5803,8 @@ export const createNodesBatch = mutation({
     pageId: v.id("pages"),
     nodes: v.array(nodeCreateInputValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:createNodesBatch");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
     const createdNodes: Doc<"nodes">[] = [];
@@ -5757,6 +5816,7 @@ export const createNodesBatch = mutation({
     // big parents exceed Convex's per-execution document read limit.
     const siblingCache = createSiblingListCache();
 
+    await assertPageWritable(ctx, args.pageId);
     for (const entry of args.nodes) {
       const parentNodeId =
         entry.parentClientId !== undefined
@@ -5770,6 +5830,9 @@ export const createNodesBatch = mutation({
           : lastParentNodeId === parentNodeId
             ? lastCreatedId
             : null;
+      if (entry.parentClientId === undefined) {
+        await assertValidParent(ctx, { nodeId: null, parentNodeId, pageId: args.pageId });
+      }
       const position = await computeNodePositionCached(
         ctx.db,
         siblingCache,
@@ -5780,7 +5843,7 @@ export const createNodesBatch = mutation({
       const text = entry.text?.trim() || "";
       const kind = normalizeNodeKindForText(text, entry.kind);
 
-      const nodeId = await ctx.db.insert("nodes", {
+      const nodeId = await ctx.db.insert("nodes", await normalizeSchedule(ctx, { before: null, pageId: args.pageId, write: {
         pageId: args.pageId,
         parentNodeId,
         position,
@@ -5804,7 +5867,7 @@ export const createNodesBatch = mutation({
         },
         createdAt: now,
         updatedAt: now,
-      });
+      } }));
 
       const node = await ctx.db.get(nodeId);
       if (!node) {
@@ -5844,12 +5907,14 @@ export const updateNode = mutation({
     dueTimeZone: v.optional(v.union(v.string(), v.null())),
     recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:updateNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       throw new Error("Node not found.");
     }
+    await assertNodeEditable(ctx, node, changeForUpdate(node, args));
 
     const patch: Partial<Doc<"nodes">> = {
       updatedAt: getTimestamp(),
@@ -5960,7 +6025,7 @@ export const updateNode = mutation({
       patch.sourceMeta = sourceMeta;
     }
 
-    await ctx.db.patch(args.nodeId, patch);
+    await ctx.db.patch(args.nodeId, await normalizeSchedule(ctx, { before: node, write: patch }));
     const refreshed = await ctx.db.get(args.nodeId);
     if (refreshed) {
       await syncLinksForNode(ctx.db, refreshed);
@@ -5994,7 +6059,8 @@ export const updateNodesBatch = mutation({
       }),
     ),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:updateNodesBatch");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     if (args.updates.length === 0) {
       return null;
@@ -6007,6 +6073,7 @@ export const updateNodesBatch = mutation({
       if (!node) {
         throw new Error("Node not found.");
       }
+      await assertNodeEditable(ctx, node, changeForUpdate(node, update));
 
       const patch: Partial<Doc<"nodes">> = {
         updatedAt: getTimestamp(),
@@ -6099,7 +6166,7 @@ export const updateNodesBatch = mutation({
         patch.sourceMeta = sourceMeta;
       }
 
-      await ctx.db.patch(update.nodeId, patch);
+      await ctx.db.patch(update.nodeId, await normalizeSchedule(ctx, { before: node, write: patch }));
       const refreshed = await ctx.db.get(update.nodeId);
       if (refreshed) {
         await syncLinksForNode(ctx.db, refreshed);
@@ -6134,8 +6201,10 @@ export const insertNodeAbove = mutation({
     shiftedKind: nodeKindValidator,
     shiftedTaskStatus: v.optional(taskStatusValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:insertNodeAbove");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "text");
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       throw new Error("Node not found.");
@@ -6237,8 +6306,10 @@ export const splitNode = mutation({
     tailKind: nodeKindValidator,
     tailTaskStatus: v.optional(taskStatusValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:splitNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "text");
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       throw new Error("Node not found.");
@@ -6330,8 +6401,10 @@ export const replaceNodeAndInsertSiblings = mutation({
       }),
     ),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:replaceNodeAndInsertSiblings");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "text");
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       throw new Error("Node not found.");
@@ -6422,7 +6495,8 @@ export const moveNode = mutation({
     parentNodeId: v.optional(nullableNodeIdValidator),
     afterNodeId: v.optional(nullableNodeIdValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:moveNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
@@ -6433,6 +6507,11 @@ export const moveNode = mutation({
     const pageId = args.pageId ?? node.pageId;
     const parentNodeId =
       args.parentNodeId === undefined ? node.parentNodeId : args.parentNodeId;
+    await assertNodeEditable(ctx, node, "move");
+    if (pageId !== node.pageId) {
+      await assertPageWritable(ctx, pageId);
+    }
+    await assertValidParent(ctx, { nodeId: args.nodeId, parentNodeId, pageId });
     const position = await computeNodePosition(
       ctx.db,
       pageId,
@@ -6467,7 +6546,8 @@ export const moveNodesBatch = mutation({
       }),
     ),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:moveNodesBatch");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     if (args.moves.length === 0) {
       return null;
@@ -6489,6 +6569,11 @@ export const moveNodesBatch = mutation({
       const pageId = move.pageId ?? node.pageId;
       const parentNodeId =
         move.parentNodeId === undefined ? node.parentNodeId : move.parentNodeId;
+      await assertNodeEditable(ctx, node, "move");
+      if (pageId !== node.pageId) {
+        await assertPageWritable(ctx, pageId);
+      }
+      await assertValidParent(ctx, { nodeId: move.nodeId, parentNodeId, pageId });
       const position = await computeNodePositionCached(
         ctx.db,
         siblingCache,
@@ -6524,8 +6609,10 @@ export const reorderNode = mutation({
     nodeId: v.id("nodes"),
     afterNodeId: v.optional(nullableNodeIdValidator),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:reorderNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "move");
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       throw new Error("Node not found.");
@@ -6553,7 +6640,8 @@ export const moveNodeTreesToPage = mutation({
     targetPageId: v.id("pages"),
     nodeIds: v.array(v.id("nodes")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:moveNodeTreesToPage");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     if (args.nodeIds.length === 0) {
       return {
@@ -6583,6 +6671,7 @@ export const moveNodeTreesToPage = mutation({
         throw new Error("Node not found.");
       }
 
+      await assertNodeEditable(ctx, node, "move");
       const page = await ctx.db.get(node.pageId);
       if (!page || page.archived) {
         throw new Error("Cannot move items from an archived page.");
@@ -6643,8 +6732,10 @@ export const archiveNode = mutation({
     nodeId: v.id("nodes"),
     archived: v.optional(v.boolean()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:archiveNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, args.archived === false ? "unarchive" : "archive");
     await ctx.db.patch(args.nodeId, {
       archived: args.archived ?? true,
       updatedAt: getTimestamp(),
@@ -6658,8 +6749,10 @@ export const setNodeTreeArchived = mutation({
     nodeId: v.id("nodes"),
     archived: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setNodeTreeArchived");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, args.archived ? "archive" : "unarchive");
     const node = await ctx.db.get(args.nodeId);
     if (!node) {
       throw new Error("Node not found.");
@@ -6692,7 +6785,8 @@ export const setNodeTreesArchivedBatch = mutation({
     nodeIds: v.array(v.id("nodes")),
     archived: v.boolean(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setNodeTreesArchivedBatch");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     if (args.nodeIds.length === 0) {
       return null;
@@ -6704,6 +6798,7 @@ export const setNodeTreesArchivedBatch = mutation({
         throw new Error("Node not found.");
       }
 
+      await assertNodeEditable(ctx, node, args.archived ? "archive" : "unarchive");
       const descendants = await setNodeTreeArchivedState(
         ctx.db,
         nodeId,
@@ -6733,8 +6828,10 @@ export const deleteNode = mutation({
     ownerKey: v.string(),
     nodeId: v.id("nodes"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:deleteNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.nodeId, "delete");
     await deleteNodeTree(ctx.db, args.nodeId);
   },
 });

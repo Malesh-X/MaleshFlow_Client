@@ -50,6 +50,7 @@ import {
   replaceLinkMarkupWithLabels,
 } from "../lib/domain/links";
 import { stripInlineFormattingMarkers } from "../lib/domain/inlineFormatting";
+import { assertNodeEditable, assertPageWritable, withGuards } from "./lib/guards";
 
 const PURE_NODE_WIKI_LINK_PATTERN = /^\[\[(?:(.*?)\|)?node:([a-zA-Z0-9_-]+)\]\]$/;
 const PURE_PAREN_NODE_LINK_PATTERN = /^\(\(([a-zA-Z0-9_-]+)\)\)$/;
@@ -310,7 +311,8 @@ export const ensurePlannerPageSections = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:ensurePlannerPageSections");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
@@ -327,8 +329,10 @@ export const setPlannerStartDate = mutation({
     pageId: v.id("pages"),
     startDate: v.number(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:setPlannerStartDate");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -352,8 +356,10 @@ export const appendPlannerDay = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:appendPlannerDay");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -384,8 +390,10 @@ export const addRandomPlannerTask = mutation({
     pageId: v.id("pages"),
     seed: v.number(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:addRandomPlannerTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -531,8 +539,10 @@ export const addPlannerSourceTask = mutation({
     pageId: v.id("pages"),
     sourceTaskId: v.id("nodes"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:addPlannerSourceTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -614,8 +624,10 @@ export const reorderPlannerDay = mutation({
     dayNodeId: v.id("nodes"),
     orderedNodeIds: v.array(v.id("nodes")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:reorderPlannerDay");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -676,8 +688,10 @@ export const reorderPlannerFocusSection = mutation({
     focusSectionId: v.id("nodes"),
     orderedNodeIds: v.array(v.id("nodes")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:reorderPlannerFocusSection");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -739,8 +753,10 @@ export const resolveNextPlannerTask = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:resolveNextPlannerTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");
@@ -825,8 +841,10 @@ export const completePlannerTask = mutation({
     plannerNodeId: v.id("nodes"),
     completionMode: v.union(v.literal("dueDate"), v.literal("today")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:completePlannerTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertNodeEditable(ctx, args.plannerNodeId, "status");
     return await completePlannerLinkedTask(ctx, {
       plannerNodeId: args.plannerNodeId,
       completionMode: args.completionMode,
@@ -875,7 +893,8 @@ export const undoCompletePlannerTask = mutation({
     ownerKey: v.string(),
     receipt: plannerCompletionReceiptValidator,
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:undoCompletePlannerTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = Date.now();
     const touchedPageIds = new Set<string>();
@@ -988,8 +1007,11 @@ export const completePlannerSourceTask = mutation({
     sourceTaskNodeId: v.id("nodes"),
     completionMode: v.union(v.literal("dueDate"), v.literal("today")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:completePlannerSourceTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.plannerPageId);
+    await assertNodeEditable(ctx, args.sourceTaskNodeId, "status");
     return await completePlannerSourceTaskInstance(ctx, {
       plannerPageId: args.plannerPageId,
       sourceTaskNodeId: args.sourceTaskNodeId,
@@ -1003,8 +1025,10 @@ export const completePlannerDay = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "planner:completePlannerDay");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await assertPageWritable(ctx, args.pageId);
     const page = await ctx.db.get(args.pageId);
     if (!page || page.archived || !isPlannerPage(page)) {
       throw new Error("Planner page not found.");

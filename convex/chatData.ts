@@ -17,6 +17,14 @@ import {
 } from "../lib/domain/planner";
 import { completePlannerLinkedTask } from "./lib/planner";
 import { normalizeAiWorkingMemoryText } from "../lib/domain/aiMemory";
+import {
+  assertNodeEditable,
+  assertPageWritable,
+  assertValidParent,
+  normalizeSchedule,
+  withGuards,
+} from "./lib/guards";
+import { changeForUpdate } from "./lib/guardRules";
 
 const WORKSPACE_KNOWLEDGE_SCOPE = "workspaceKnowledge";
 
@@ -41,7 +49,8 @@ export const ensureChatThread = mutation({
     ownerKey: v.string(),
     pageId: v.optional(v.id("pages")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "chatData:ensureChatThread");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const existing = args.pageId
       ? await ctx.db
@@ -75,7 +84,8 @@ export const ensureWorkspaceKnowledgeThread = mutation({
   args: {
     ownerKey: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "chatData:ensureWorkspaceKnowledgeThread");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
 
     const existing = await findWorkspaceKnowledgeThread(ctx);
@@ -261,7 +271,8 @@ export const replaceSectionLines = internalMutation({
     lines: v.array(v.string()),
     generatedFrom: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "chatData:replaceSectionLines");
     const normalizedLines = args.lines
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
@@ -479,6 +490,9 @@ async function applyOperation(
         }
       }
 
+      await assertPageWritable(ctx, pageId);
+      await assertValidParent(ctx, { nodeId: null, parentNodeId, pageId });
+
       const explicitAfterNodeId = resolveChatOperationAfterNodeId(
         operation,
         createdNodeIdsByClientId,
@@ -556,6 +570,13 @@ async function applyOperation(
         return;
       }
 
+      await assertNodeEditable(ctx, node, changeForUpdate(node, {
+        kind: operation.kind ?? undefined,
+        taskStatus: operation.taskStatus ?? undefined,
+        noteCompleted: operation.noteCompleted ?? undefined,
+        text: operation.text ?? undefined,
+        dueAt: operation.dueAt ?? undefined,
+      }));
       const nextKind = operation.kind ?? node.kind;
       const patch: Partial<Doc<"nodes">> = {
         updatedAt: Date.now(),
@@ -596,7 +617,7 @@ async function applyOperation(
         patch.sourceMeta = sourceMeta;
       }
 
-      await ctx.db.patch(nodeId, patch);
+      await ctx.db.patch(nodeId, await normalizeSchedule(ctx, { before: node, write: patch }));
       const updated = await ctx.db.get(nodeId);
       if (updated) {
         await syncLinksForNode(ctx.db, updated);
@@ -626,6 +647,11 @@ async function applyOperation(
               node.parentNodeId,
             )
           : null;
+      await assertNodeEditable(ctx, node, "move");
+      if (nextPageId !== node.pageId) {
+        await assertPageWritable(ctx, nextPageId);
+      }
+      await assertValidParent(ctx, { nodeId, parentNodeId: nextParentId, pageId: nextPageId });
       const position = await computeNodePosition(
         ctx.db,
         nextPageId,
@@ -649,6 +675,7 @@ async function applyOperation(
       if (!operation.nodeId) {
         return;
       }
+      await assertNodeEditable(ctx, operation.nodeId as Id<"nodes">, operation.archived === false ? "unarchive" : "archive");
       await ctx.db.patch(operation.nodeId as Id<"nodes">, {
         archived: operation.archived ?? true,
         updatedAt: Date.now(),
@@ -659,6 +686,7 @@ async function applyOperation(
       if (!operation.nodeId) {
         return;
       }
+      await assertNodeEditable(ctx, operation.nodeId as Id<"nodes">, "delete");
       await deleteNodeTree(ctx.db, operation.nodeId as Id<"nodes">);
       return;
     }
@@ -675,6 +703,8 @@ async function applyOperation(
         return;
       }
 
+      await assertNodeEditable(ctx, target, "text");
+      await assertNodeEditable(ctx, source, "delete");
       await ctx.db.patch(target._id, {
         text: `${target.text}\n${source.text}`.trim(),
         updatedAt: Date.now(),
@@ -826,6 +856,7 @@ async function applyPlannerOperation(
 ) {
   switch (operation.type) {
     case "complete_planner_task": {
+      await assertNodeEditable(ctx, operation.nodeId as Id<"nodes">, "status");
       await completePlannerLinkedTask(ctx, {
         plannerNodeId: operation.nodeId as Id<"nodes">,
         completionMode,
@@ -833,10 +864,12 @@ async function applyPlannerOperation(
       return;
     }
     case "delete_planner_node": {
+      await assertNodeEditable(ctx, operation.nodeId as Id<"nodes">, "delete");
       await deleteNodeTree(ctx.db, operation.nodeId as Id<"nodes">);
       return;
     }
     case "update_planner_node": {
+      await assertNodeEditable(ctx, operation.nodeId as Id<"nodes">, "text");
       await ctx.db.patch(operation.nodeId as Id<"nodes">, {
         ...(operation.text !== null ? { text: operation.text } : {}),
         updatedAt: Date.now(),
@@ -859,6 +892,8 @@ async function applyPlannerOperation(
           ? node.parentNodeId
           : ((operation.parentNodeId as Id<"nodes"> | null) ?? null);
       const afterNodeId = (operation.afterNodeId as Id<"nodes"> | null | undefined) ?? null;
+      await assertNodeEditable(ctx, node, "move");
+      await assertValidParent(ctx, { nodeId: node._id, parentNodeId, pageId: node.pageId });
       const position = await computeNodePosition(
         ctx.db,
         node.pageId,
@@ -907,7 +942,8 @@ export const applyApprovedChatPlan = mutation({
     ownerKey: v.string(),
     messageId: v.id("chatMessages"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "chatData:applyApprovedChatPlan");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const message = await ctx.db.get(args.messageId);
     if (!message || message.role !== "assistant" || !message.proposedPlan) {
@@ -959,7 +995,8 @@ export const applyApprovedPlannerPlan = mutation({
     messageId: v.id("chatMessages"),
     completionMode: v.union(v.literal("dueDate"), v.literal("today")),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "chatData:applyApprovedPlannerPlan");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const message = await ctx.db.get(args.messageId);
     if (!message || message.role !== "assistant" || !message.proposedPlan) {

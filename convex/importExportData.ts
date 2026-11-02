@@ -10,6 +10,7 @@ import {
   sanitizeDataDumpPathSegment,
 } from "../lib/domain/dataDump";
 import { buildUniquePageSlug, enqueueNodeAiWork, syncLinksForNode } from "./lib/workspace";
+import { withGuards } from "./lib/guards";
 
 type DataDumpFile = {
   path: string;
@@ -321,7 +322,8 @@ export const persistImportedPages = internalMutation({
       }),
     ),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "importExportData:persistImportedPages");
     const pageIdBySourcePath = new Map<string, Id<"pages">>();
     let importedNodeCount = 0;
 

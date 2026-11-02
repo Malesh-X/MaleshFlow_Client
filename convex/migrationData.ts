@@ -30,6 +30,7 @@ import {
 } from "../lib/domain/migration";
 import { extractLinkMatches } from "../lib/domain/links";
 import { stripTagSyntax } from "../lib/domain/migration";
+import { withGuards } from "./lib/guards";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const createPageRef = api.workspace.createPage as any;
@@ -695,7 +696,8 @@ export const updateMigrationLessonsDoc = mutation({
     runId: v.optional(v.id("migrationRuns")),
     lessonsDoc: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "migrationData:updateMigrationLessonsDoc");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const lessonsEntry = await ensureMigrationLessonsDoc(ctx, args.sourceType);
     await ctx.db.patch(lessonsEntry._id, {
@@ -719,7 +721,8 @@ export const abandonMigrationRun = mutation({
     ownerKey: v.string(),
     runId: v.id("migrationRuns"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "migrationData:abandonMigrationRun");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const run = await ctx.db.get(args.runId);
     if (!run) {
@@ -739,7 +742,8 @@ export const skipMigrationChunk = mutation({
     ownerKey: v.string(),
     chunkId: v.id("migrationChunks"),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "migrationData:skipMigrationChunk");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const chunk = await ctx.db.get(args.chunkId);
     if (!chunk) {
@@ -975,7 +979,8 @@ export const applyMigrationChunkInternal = internalMutation({
     guidance: v.string(),
     exampleVector: v.array(v.float64()),
   },
-  handler: async (ctx, args) => {
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "migrationData:applyMigrationChunkInternal");
     const parsedPlan = migrationChunkPlanSchema.safeParse(args.plan);
     if (!parsedPlan.success) {
       throw new Error("Invalid migration plan.");

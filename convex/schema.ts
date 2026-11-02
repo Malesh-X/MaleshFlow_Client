@@ -40,6 +40,8 @@ export default defineSchema({
     dueTimeZone: v.optional(v.union(v.string(), v.null())),
     archived: v.boolean(),
     sourceMeta: v.optional(v.any()),
+    // Bumped on every write through the guarded mutations (convex/lib/guards.ts).
+    revision: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -404,4 +406,15 @@ export default defineSchema({
   })
     .index("by_node", ["nodeId"])
     .index("by_content_hash", ["contentHash"]),
+
+  // Writes the guards would refuse or change (convex/lib/guards.ts).
+  guardViolations: defineTable({
+    mutation: v.string(),
+    guard: v.string(),
+    mode: v.string(),
+    nodeId: v.optional(v.string()),
+    pageId: v.optional(v.string()),
+    detail: v.string(),
+    createdAt: v.number(),
+  }).index("by_createdAt", ["createdAt"]),
 });
