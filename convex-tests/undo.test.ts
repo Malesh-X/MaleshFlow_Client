@@ -223,56 +223,91 @@ describe("redo replays the original intent", () => {
   });
 });
 
-// The app's one-step "edit the text, then check the box": undo runs the
-// completion undo, then the text undo; redo runs the text redo, then the
-// completion redo, passing on the revisions its own text undo and redo wrote.
+// The app's one-step "edit the text, then check the box". Undo and redo each
+// go through one mutation that checks the receipt before writing anything,
+// then applies the text and the completion together.
 describe("text edit plus completion in one history step", () => {
+  const snapshot = (text: string) => ({ text, kind: "task" as const, taskStatus: "todo" as const, noteCompleted: false });
   async function editThenComplete() {
     const s = await setup();
     const pageId = await s.page("Plain", "Notes", "note");
     const task = await s.add(pageId, "Draft", { kind: "task", taskStatus: "todo" });
     await s.t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, text: "Draft, edited" });
     const done = await s.complete(task);
-    await s.undo(done.receiptId);
-    const undoWrite = (await s.t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, text: "Draft" }))!;
-    expect((await s.get(task))!.taskStatus).toBe("todo");
-    const redoText = () => s.t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, text: "Draft, edited" });
-    const redoCompletion = (ownWrites: { nodeId: Id<"nodes">; revisionBefore: number; revision: number }[]) =>
-      s.t.mutation(api.workspace.redoCompletion, { ownerKey, receiptIds: [done.receiptId!], ownWrites: [undoWrite, ...ownWrites] });
-    return { ...s, task, redoText, redoCompletion };
+    const receiptIds = [done.receiptId!];
+    const undoStep = () =>
+      s.t.mutation(api.workspace.undoTextEditAndCompletion, { ownerKey, receiptIds, nodeId: task, edit: snapshot("Draft") });
+    const redoStep = () =>
+      s.t.mutation(api.workspace.redoTextEditAndCompletion, { ownerKey, receiptIds, nodeId: task, edit: snapshot("Draft, edited") });
+    const revision = async () => (await s.get(task))!.revision;
+    return { ...s, task, receiptIds, undoStep, redoStep, revision };
   }
 
-  test("after undo, redo leaves the text redone and the task completed", async () => {
-    const { get, task, redoText, redoCompletion } = await editThenComplete();
-    const write = await redoText();
-    await redoCompletion([write!]);
-    const after = (await get(task))!;
+  test("undo puts back the text and reopens the task; redo does both again", async () => {
+    const { get, task, undoStep, redoStep } = await editThenComplete();
+    await undoStep();
+    let after = (await get(task))!;
+    expect(after.text).toBe("Draft");
+    expect(after.taskStatus).toBe("todo");
+    await redoStep();
+    after = (await get(task))!;
     expect(after.text).toBe("Draft, edited");
     expect(after.taskStatus).toBe("done");
+    // And again: the receipt stays in step with both writes.
+    await undoStep();
+    await redoStep();
+    expect((await get(task))!.taskStatus).toBe("done");
   });
 
-  test("another tab's edit before the text redo still makes the redo refuse", async () => {
-    const { t, get, task, redoText, redoCompletion } = await editThenComplete();
+  test("a text change from another tab after the undo: redo refuses and writes nothing", async () => {
+    const { t, get, task, undoStep, redoStep, revision } = await editThenComplete();
+    await undoStep();
+    await t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, text: "Changed in another tab" });
+    const before = await revision();
+    expect(await refusal(redoStep())).toMatch(/Nothing was redone/);
+    const after = (await get(task))!;
+    expect(after.text).toBe("Changed in another tab");
+    expect(after.taskStatus).toBe("todo");
+    expect(after.revision).toBe(before);
+  });
+
+  test("another tab's edit to another field after the undo still makes the redo refuse", async () => {
+    const { t, get, task, undoStep, redoStep } = await editThenComplete();
+    await undoStep();
     await t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, priority: "high" });
-    const write = await redoText();
-    await refusal(redoCompletion([write!]));
+    await refusal(redoStep());
+    const after = (await get(task))!;
+    expect(after.text).toBe("Draft");
+    expect(after.taskStatus).toBe("todo");
+  });
+
+  test("a separate text write followed by a plain completion redo still refuses", async () => {
+    const { t, get, task, receiptIds, undoStep } = await editThenComplete();
+    await undoStep();
+    await t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, text: "Draft, edited" });
+    await refusal(t.mutation(api.workspace.redoCompletion, { ownerKey, receiptIds }));
     expect((await get(task))!.taskStatus).toBe("todo");
   });
 
-  test("without the app's own writes the redo refuses, as before", async () => {
-    const { t, get, task, redoText } = await editThenComplete();
-    await redoText();
-    const receipts = await t.run((ctx) => ctx.db.query("undoReceipts").collect());
-    await refusal(t.mutation(api.workspace.redoCompletion, { ownerKey, receiptIds: [receipts[0]!._id] }));
-    expect((await get(task))!.taskStatus).toBe("todo");
+  test("a text change from another tab after the completion: undo refuses and writes nothing", async () => {
+    const { t, get, task, undoStep, revision } = await editThenComplete();
+    await t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, text: "Changed in another tab" });
+    const before = await revision();
+    expect(await refusal(undoStep())).toMatch(/Nothing was undone/);
+    const after = (await get(task))!;
+    expect(after.text).toBe("Changed in another tab");
+    expect(after.taskStatus).toBe("done");
+    expect(after.revision).toBe(before);
   });
 
-  test("another tab's edit after the text redo still makes the redo refuse", async () => {
-    const { t, get, task, redoText, redoCompletion } = await editThenComplete();
-    const write = await redoText();
-    await t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, priority: "high" });
-    await refusal(redoCompletion([write!]));
-    expect((await get(task))!.taskStatus).toBe("todo");
+  test("a step whose receipt doesn't cover the edited item is refused", async () => {
+    const { t, add, get, receiptIds } = await editThenComplete();
+    const pageId = await t.mutation(api.workspace.createPage, { ownerKey, title: "Other", sidebarSection: "Notes", pageType: "note" });
+    const other = await add(pageId, "Other", { kind: "task", taskStatus: "todo" });
+    await refusal(
+      t.mutation(api.workspace.undoTextEditAndCompletion, { ownerKey, receiptIds, nodeId: other, edit: snapshot("Overwritten") }),
+    );
+    expect((await get(other))!.text).toBe("Other");
   });
 });
 

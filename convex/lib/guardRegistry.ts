@@ -12,7 +12,7 @@ export type GuardedEntry = { checks: string; via?: string[] };
 export const GUARDED_MUTATIONS: Record<string, GuardedEntry> = {
   "workspace:createNode": { checks: "page writable, parent valid, schedule" },
   "workspace:createNodesBatch": { checks: "page writable, each existing parent valid, schedule per entry" },
-  "workspace:updateNode": { checks: "node editable (kind/status locks, archived page), schedule" },
+  "workspace:updateNode": { checks: "node editable (kind/status locks, archived page), schedule", via: ["applyNodeUpdate"] },
   "workspace:updateNodesBatch": { checks: "node editable per update, schedule per update" },
   "workspace:insertNodeAbove": { checks: "node editable" },
   "workspace:splitNode": { checks: "node editable" },
@@ -33,6 +33,14 @@ export const GUARDED_MUTATIONS: Record<string, GuardedEntry> = {
   "workspace:completeTaskPageTask": { checks: "node status editable (legacy adapter for old tabs)" },
   "workspace:setRecurrenceBasis": { checks: "node schedule editable" },
   "workspace:setNodeCompletion": { checks: "node status editable; planner page writable for previews", via: ["runNodeCompletion"] },
+  "workspace:undoTextEditAndCompletion": {
+    checks: "the text edit goes through updateNode's checks (node editable, schedule) after the receipt's own checks",
+    via: ["applyNodeUpdate"],
+  },
+  "workspace:redoTextEditAndCompletion": {
+    checks: "the text edit goes through updateNode's checks, then the completion re-runs (node status editable), after the receipt's own checks",
+    via: ["applyNodeUpdate", "runNodeCompletion"],
+  },
   "workspace:redoCompletion": {
     checks: "re-runs the completion (node status editable, or archivable for force archive) after its own receipt checks",
     via: ["runNodeCompletion", "forceArchiveCore"],

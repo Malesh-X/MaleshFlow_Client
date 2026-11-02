@@ -1,5 +1,5 @@
 import slugify from "slugify";
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type ObjectType } from "convex/values";
 import { internal } from "./_generated/api";
 import {
   internalMutation,
@@ -5406,18 +5406,82 @@ export const redoCompletion = mutation({
   args: {
     ownerKey: v.string(),
     receiptIds: v.array(v.string()),
-    // Writes the caller made itself since the undo, as updateNode reported
-    // them (a history step that redoes a text edit before the completion).
-    ownWrites: v.optional(
-      v.array(v.object({ nodeId: v.id("nodes"), revisionBefore: v.number(), revision: v.number() })),
-    ),
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:redoCompletion");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const results = [];
     for (const receiptId of args.receiptIds) {
-      results.push(await redoStoredReceipt(ctx, receiptId, (row) => rerunReceiptAction(ctx, row), args.ownWrites ?? []));
+      results.push(await redoStoredReceipt(ctx, receiptId, (row) => rerunReceiptAction(ctx, row)));
+    }
+    return results;
+  },
+});
+
+// What workspace:updateNode can change on one item.
+const updateNodeFields = {
+  text: v.optional(v.string()),
+  kind: v.optional(nodeKindValidator),
+  lockKind: v.optional(v.boolean()),
+  taskStatus: v.optional(taskStatusValidator),
+  noteCompleted: v.optional(v.boolean()),
+  priority: v.optional(priorityValidator),
+  dueAt: v.optional(v.union(v.number(), v.null())),
+  dueEndAt: v.optional(v.union(v.number(), v.null())),
+  dueTime: v.optional(v.union(v.string(), v.null())),
+  dueTimeZone: v.optional(v.union(v.string(), v.null())),
+  recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
+  parseDraft: v.optional(v.boolean()),
+};
+
+// The app's one history step for "edit the text, then check the box": the
+// item's values to put back (before the edit on undo, after it on redo) and
+// the completion's receipts. Each runs as one transaction that checks the
+// receipts before writing anything, so a refused step writes nothing, not
+// even the text.
+const textEditAndCompletionArgs = {
+  ownerKey: v.string(),
+  receiptIds: v.array(v.string()),
+  nodeId: v.id("nodes"),
+  edit: v.object({
+    text: v.string(),
+    kind: updateNodeFields.kind,
+    taskStatus: updateNodeFields.taskStatus,
+    noteCompleted: updateNodeFields.noteCompleted,
+    dueAt: updateNodeFields.dueAt,
+    dueEndAt: updateNodeFields.dueEndAt,
+    dueTime: updateNodeFields.dueTime,
+    dueTimeZone: updateNodeFields.dueTimeZone,
+    recurrenceFrequency: updateNodeFields.recurrenceFrequency,
+  }),
+};
+
+// Undoes the completion (newest receipt first), then the text edit.
+export const undoTextEditAndCompletion = mutation({
+  args: textEditAndCompletionArgs,
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:undoTextEditAndCompletion");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const edit = { nodeId: args.nodeId, apply: () => applyNodeUpdate(ctx, { nodeId: args.nodeId, ...args.edit }) };
+    const results = [];
+    for (const [index, receiptId] of args.receiptIds.entries()) {
+      const isLast = index === args.receiptIds.length - 1;
+      results.push(await undoStoredReceipt(ctx, receiptId, isLast ? edit : undefined));
+    }
+    return results;
+  },
+});
+
+// Redoes the text edit, then the completion (receipts in the original order).
+export const redoTextEditAndCompletion = mutation({
+  args: textEditAndCompletionArgs,
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:redoTextEditAndCompletion");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const edit = { nodeId: args.nodeId, apply: () => applyNodeUpdate(ctx, { nodeId: args.nodeId, ...args.edit }) };
+    const results = [];
+    for (const [index, receiptId] of args.receiptIds.entries()) {
+      results.push(await redoStoredReceipt(ctx, receiptId, (row) => rerunReceiptAction(ctx, row), index === 0 ? edit : undefined));
     }
     return results;
   },
@@ -5906,166 +5970,156 @@ export const createNodesBatch = mutation({
   },
 });
 
+// One item's edit, as workspace:updateNode applies it. Also used by the
+// history steps that put back a text edit together with a completion.
+async function applyNodeUpdate(
+  ctx: MutationCtx,
+  rawArgs: ObjectType<typeof updateNodeFields> & { nodeId: Id<"nodes"> },
+) {
+  const node = await ctx.db.get(rawArgs.nodeId);
+  if (!node) {
+    throw new Error("Node not found.");
+  }
+  // Plain text keeps the item's kind and status; a marker changes them.
+  const args = rawArgs.parseDraft
+    ? applyDraftSyntax(rawArgs, { kind: node.kind, taskStatus: node.taskStatus ?? null })
+    : rawArgs;
+  await assertNodeEditable(ctx, node, changeForUpdate(node, args));
+
+  const patch: Partial<Doc<"nodes">> = {
+    updatedAt: getTimestamp(),
+  };
+  const nextText = args.text !== undefined ? args.text : node.text;
+  const nextKind = normalizeNodeKindForText(
+    nextText,
+    args.kind !== undefined ? args.kind : node.kind,
+  );
+  const isSeparatorNote = isSeparatorLineText(nextText);
+
+  if (args.text !== undefined) {
+    patch.text = args.text;
+  }
+
+  if (args.kind !== undefined || (args.text !== undefined && nextKind !== node.kind)) {
+    patch.kind = nextKind;
+    patch.taskStatus = normalizeTaskStatusForKind(
+      nextKind,
+      args.taskStatus,
+      node.taskStatus,
+    );
+  } else if (args.taskStatus !== undefined) {
+    patch.taskStatus = args.taskStatus;
+  }
+
+  if (args.priority !== undefined) {
+    patch.priority = args.priority;
+  }
+
+  if (args.dueAt !== undefined) {
+    patch.dueAt = args.dueAt;
+    if (args.dueAt === null) {
+      patch.dueTime = null;
+      patch.dueTimeZone = null;
+    }
+  }
+
+  if (args.dueEndAt !== undefined) {
+    patch.dueEndAt = args.dueEndAt;
+  }
+
+  if (args.dueTime !== undefined || args.dueTimeZone !== undefined) {
+    if (args.dueTime && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(args.dueTime) || !args.dueTimeZone)) {
+      throw new Error("A scheduled time needs a valid time and time zone.");
+    }
+    if (args.dueTime && !(args.dueAt ?? node.dueAt)) {
+      throw new Error("Choose a due date before setting a time.");
+    }
+    if (args.dueTimeZone) {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: args.dueTimeZone });
+      } catch {
+        throw new Error("Invalid task schedule time zone.");
+      }
+    }
+    patch.dueTime = args.dueTime ?? null;
+    patch.dueTimeZone = args.dueTime ? args.dueTimeZone : null;
+  }
+
+  if (isSeparatorNote) {
+    patch.kind = "note";
+    patch.taskStatus = null;
+    patch.priority = null;
+    patch.dueAt = null;
+    patch.dueEndAt = null;
+    patch.dueTime = null;
+    patch.dueTimeZone = null;
+  }
+
+  if (nextKind !== "task") {
+    patch.dueTime = null;
+    patch.dueTimeZone = null;
+  }
+
+  if (
+    args.lockKind !== undefined ||
+    args.noteCompleted !== undefined ||
+    args.kind !== undefined ||
+    args.recurrenceFrequency !== undefined ||
+    isSeparatorNote
+  ) {
+    const sourceMeta =
+      node.sourceMeta && typeof node.sourceMeta === "object"
+        ? { ...(node.sourceMeta as Record<string, unknown>) }
+        : {};
+
+    if (args.lockKind !== undefined) {
+      sourceMeta.taskKindLocked = args.lockKind;
+    }
+
+    if (isSeparatorNote) {
+      sourceMeta.noteCompleted = false;
+    } else if (args.noteCompleted !== undefined) {
+      sourceMeta.noteCompleted = args.noteCompleted;
+    } else if (nextKind === "task" && args.kind !== undefined) {
+      sourceMeta.noteCompleted = false;
+    }
+
+    if (isSeparatorNote) {
+      sourceMeta.recurrenceFrequency = null;
+    } else if (args.recurrenceFrequency !== undefined) {
+      sourceMeta.recurrenceFrequency = args.recurrenceFrequency;
+    } else if (nextKind === "note" && args.kind !== undefined) {
+      sourceMeta.recurrenceFrequency = null;
+    }
+
+    patch.sourceMeta = sourceMeta;
+  }
+
+  await ctx.db.patch(args.nodeId, await normalizeSchedule(ctx, { before: node, write: patch }));
+  const refreshed = await ctx.db.get(args.nodeId);
+  if (refreshed) {
+    await syncLinksForNode(ctx.db, refreshed);
+    await enqueueNodeAiWork(ctx, refreshed._id);
+    if (shouldAppendRecurringPlannerSidebarTaskOccurrence(node, refreshed)) {
+      await appendPlannerSidebarSourceTaskToMatchingDay(ctx, {
+        ...refreshed,
+        dueEndAt: refreshed.dueEndAt ?? null,
+      });
+    }
+    await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
+  }
+}
+
 export const updateNode = mutation({
   args: {
     ownerKey: v.string(),
     nodeId: v.id("nodes"),
-    text: v.optional(v.string()),
-    kind: v.optional(nodeKindValidator),
-    lockKind: v.optional(v.boolean()),
-    taskStatus: v.optional(taskStatusValidator),
-    noteCompleted: v.optional(v.boolean()),
-    priority: v.optional(priorityValidator),
-    dueAt: v.optional(v.union(v.number(), v.null())),
-    dueEndAt: v.optional(v.union(v.number(), v.null())),
-    dueTime: v.optional(v.union(v.string(), v.null())),
-    dueTimeZone: v.optional(v.union(v.string(), v.null())),
-    recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
-    parseDraft: v.optional(v.boolean()),
+    ...updateNodeFields,
   },
-  handler: async (rawCtx, rawArgs) => {
+  handler: async (rawCtx, { ownerKey, ...args }) => {
     const ctx = withGuards(rawCtx, "workspace:updateNode");
-    await assertOwnerKeyGuarded(ctx.db, rawArgs.ownerKey);
-    const node = await ctx.db.get(rawArgs.nodeId);
-    if (!node) {
-      throw new Error("Node not found.");
-    }
-    // Plain text keeps the item's kind and status; a marker changes them.
-    const args = rawArgs.parseDraft
-      ? applyDraftSyntax(rawArgs, { kind: node.kind, taskStatus: node.taskStatus ?? null })
-      : rawArgs;
-    await assertNodeEditable(ctx, node, changeForUpdate(node, args));
-
-    const patch: Partial<Doc<"nodes">> = {
-      updatedAt: getTimestamp(),
-    };
-    const nextText = args.text !== undefined ? args.text : node.text;
-    const nextKind = normalizeNodeKindForText(
-      nextText,
-      args.kind !== undefined ? args.kind : node.kind,
-    );
-    const isSeparatorNote = isSeparatorLineText(nextText);
-
-    if (args.text !== undefined) {
-      patch.text = args.text;
-    }
-
-    if (args.kind !== undefined || (args.text !== undefined && nextKind !== node.kind)) {
-      patch.kind = nextKind;
-      patch.taskStatus = normalizeTaskStatusForKind(
-        nextKind,
-        args.taskStatus,
-        node.taskStatus,
-      );
-    } else if (args.taskStatus !== undefined) {
-      patch.taskStatus = args.taskStatus;
-    }
-
-    if (args.priority !== undefined) {
-      patch.priority = args.priority;
-    }
-
-    if (args.dueAt !== undefined) {
-      patch.dueAt = args.dueAt;
-      if (args.dueAt === null) {
-        patch.dueTime = null;
-        patch.dueTimeZone = null;
-      }
-    }
-
-    if (args.dueEndAt !== undefined) {
-      patch.dueEndAt = args.dueEndAt;
-    }
-
-    if (args.dueTime !== undefined || args.dueTimeZone !== undefined) {
-      if (args.dueTime && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(args.dueTime) || !args.dueTimeZone)) {
-        throw new Error("A scheduled time needs a valid time and time zone.");
-      }
-      if (args.dueTime && !(args.dueAt ?? node.dueAt)) {
-        throw new Error("Choose a due date before setting a time.");
-      }
-      if (args.dueTimeZone) {
-        try {
-          new Intl.DateTimeFormat("en-US", { timeZone: args.dueTimeZone });
-        } catch {
-          throw new Error("Invalid task schedule time zone.");
-        }
-      }
-      patch.dueTime = args.dueTime ?? null;
-      patch.dueTimeZone = args.dueTime ? args.dueTimeZone : null;
-    }
-
-    if (isSeparatorNote) {
-      patch.kind = "note";
-      patch.taskStatus = null;
-      patch.priority = null;
-      patch.dueAt = null;
-      patch.dueEndAt = null;
-      patch.dueTime = null;
-      patch.dueTimeZone = null;
-    }
-
-    if (nextKind !== "task") {
-      patch.dueTime = null;
-      patch.dueTimeZone = null;
-    }
-
-    if (
-      args.lockKind !== undefined ||
-      args.noteCompleted !== undefined ||
-      args.kind !== undefined ||
-      args.recurrenceFrequency !== undefined ||
-      isSeparatorNote
-    ) {
-      const sourceMeta =
-        node.sourceMeta && typeof node.sourceMeta === "object"
-          ? { ...(node.sourceMeta as Record<string, unknown>) }
-          : {};
-
-      if (args.lockKind !== undefined) {
-        sourceMeta.taskKindLocked = args.lockKind;
-      }
-
-      if (isSeparatorNote) {
-        sourceMeta.noteCompleted = false;
-      } else if (args.noteCompleted !== undefined) {
-        sourceMeta.noteCompleted = args.noteCompleted;
-      } else if (nextKind === "task" && args.kind !== undefined) {
-        sourceMeta.noteCompleted = false;
-      }
-
-      if (isSeparatorNote) {
-        sourceMeta.recurrenceFrequency = null;
-      } else if (args.recurrenceFrequency !== undefined) {
-        sourceMeta.recurrenceFrequency = args.recurrenceFrequency;
-      } else if (nextKind === "note" && args.kind !== undefined) {
-        sourceMeta.recurrenceFrequency = null;
-      }
-
-      patch.sourceMeta = sourceMeta;
-    }
-
-    await ctx.db.patch(args.nodeId, await normalizeSchedule(ctx, { before: node, write: patch }));
-    const refreshed = await ctx.db.get(args.nodeId);
-    if (refreshed) {
-      await syncLinksForNode(ctx.db, refreshed);
-      await enqueueNodeAiWork(ctx, refreshed._id);
-      if (shouldAppendRecurringPlannerSidebarTaskOccurrence(node, refreshed)) {
-        await appendPlannerSidebarSourceTaskToMatchingDay(ctx, {
-          ...refreshed,
-          dueEndAt: refreshed.dueEndAt ?? null,
-        });
-      }
-      await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
-    }
-    // The revision this write moved the item from and to. The app passes it
-    // to redoCompletion when a history step redoes a text edit and then a
-    // completion of the same item (see redoStoredReceipt's ownWrites).
-    return {
-      nodeId: args.nodeId,
-      revisionBefore: node.revision ?? 0,
-      revision: (await ctx.db.get(args.nodeId))?.revision ?? 0,
-    };
+    await assertOwnerKeyGuarded(ctx.db, ownerKey);
+    await applyNodeUpdate(ctx, args);
   },
 });
 

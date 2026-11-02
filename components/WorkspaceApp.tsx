@@ -4470,6 +4470,8 @@ function ConfiguredWorkspace({
   const suggestNextPlannerTask = useAction(api.plannerAi.suggestNextPlannerTask);
   const undoCompletionRaw = useMutation(api.workspace.undoCompletion);
   const redoCompletionRaw = useMutation(api.workspace.redoCompletion);
+  const undoTextEditAndCompletionRaw = useMutation(api.workspace.undoTextEditAndCompletion);
+  const redoTextEditAndCompletionRaw = useMutation(api.workspace.redoTextEditAndCompletion);
   // Sends the revision the caller saw. A stale answer is retried once with the
   // server's revision only when the item still looks the way the caller saw it
   // (see completionStateMatches), so a text edit doesn't block the checkbox but
@@ -4789,6 +4791,8 @@ function ConfiguredWorkspace({
     setNodeTreesArchivedBatch: setNodeTreesArchivedBatchRaw,
     undoCompletion: undoCompletionRaw,
     redoCompletion: redoCompletionRaw,
+    undoTextEditAndCompletion: undoTextEditAndCompletionRaw,
+    redoTextEditAndCompletion: redoTextEditAndCompletionRaw,
     onHistoryMessage: setCopySnackbarMessage,
     isDisabled: activePageTree?.page?.archived ?? false,
   });

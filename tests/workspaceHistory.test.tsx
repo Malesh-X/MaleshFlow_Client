@@ -289,6 +289,8 @@ function HistoryHarness() {
     setNodeTreesArchivedBatch: async () => undefined,
     undoCompletion: async () => null,
     redoCompletion: async () => null,
+    undoTextEditAndCompletion: async () => null,
+    redoTextEditAndCompletion: async () => null,
     draftCheckpointDelayMs: 20,
   });
 
@@ -385,6 +387,8 @@ function CompletionHarness({ undoCompletion }: { undoCompletion: () => Promise<u
     setNodeTreesArchivedBatch: async () => undefined,
     undoCompletion,
     redoCompletion: async () => null,
+    undoTextEditAndCompletion: async () => null,
+    redoTextEditAndCompletion: async () => null,
     onHistoryMessage: setMessage,
   });
   const pushed = useRef(false);
@@ -447,40 +451,49 @@ test("a failed completion undo keeps the step and says so", { concurrency: false
   dom.window.close();
 });
 
-// A text edit and a completion in one step: undo runs the completion undo,
-// then the text undo; redo runs the text redo, then the completion redo with
-// both of this tab's text writes, so the server doesn't take them for an edit
-// from elsewhere.
-type OwnWriteArg = { nodeId: string; revisionBefore: number; revision: number };
-function CompoundHarness({ calls }: { calls: string[]; }) {
-  const revision = useRef(5);
-  const redoArgs = useRef<OwnWriteArg[] | undefined>(undefined);
-  const [redoWrites, setRedoWrites] = useState("");
+// A text edit and a completion in one step: undo and redo each go to the
+// server as one call that checks first and writes both or nothing. No
+// separate text write is sent, so a refused step can't overwrite newer text.
+type TextEditStepArgs = { receiptIds: string[]; nodeId: string; edit: { text: string } };
+function CompoundHarness({
+  calls,
+  undoStep,
+  redoStep,
+}: {
+  calls: string[];
+  undoStep?: (args: TextEditStepArgs) => Promise<unknown>;
+  redoStep?: (args: TextEditStepArgs) => Promise<unknown>;
+}) {
+  const [message, setMessage] = useState("");
   const snapshot = (text: string): NodeValueSnapshot => ({ text, kind: "task", taskStatus: "todo", noteCompleted: false });
   const history = useWorkspaceHistoryController({
     ownerKey: "owner",
     selectedPageId: PAGE_ONE,
     setSelectedPageId: () => undefined,
     renamePage: async () => undefined,
-    updateNode: async ({ nodeId, text }) => {
+    updateNode: async ({ text }) => {
       calls.push(`text:${text}`);
-      revision.current += 1;
-      return { nodeId, revisionBefore: revision.current - 1, revision: revision.current };
     },
     moveNode: async () => undefined,
     setNodeTreeArchived: async () => undefined,
     setNodeTreesArchivedBatch: async () => undefined,
     undoCompletion: async () => {
       calls.push("undoCompletion");
-      revision.current += 1;
       return null;
     },
-    redoCompletion: async ({ ownWrites }) => {
+    redoCompletion: async () => {
       calls.push("redoCompletion");
-      redoArgs.current = ownWrites;
-      setRedoWrites(JSON.stringify(ownWrites ?? null));
       return null;
     },
+    undoTextEditAndCompletion: async (args) => {
+      calls.push(`undoStep:${args.edit.text}:${args.receiptIds.join(",")}`);
+      return undoStep ? undoStep(args) : null;
+    },
+    redoTextEditAndCompletion: async (args) => {
+      calls.push(`redoStep:${args.edit.text}:${args.receiptIds.join(",")}`);
+      return redoStep ? redoStep(args) : null;
+    },
+    onHistoryMessage: setMessage,
   });
   const pushed = useRef(false);
   useEffect(() => {
@@ -499,6 +512,7 @@ function CompoundHarness({ calls }: { calls: string[]; }) {
   }, [history]);
   return (
     <div>
+      <div data-testid="message">{message}</div>
       <button data-testid="undo" onClick={() => void history.undo()}>
         Undo
       </button>
@@ -506,12 +520,15 @@ function CompoundHarness({ calls }: { calls: string[]; }) {
         Redo
       </button>
       <div data-testid="counts">{`${history.canUndo}/${history.canRedo}`}</div>
-      <div data-testid="redo-writes">{redoWrites}</div>
     </div>
   );
 }
 
-test("redoing a text edit plus completion passes this tab's text writes to the completion redo", { concurrency: false }, async () => {
+const refused = (verb: "undone" | "redone") => async () => {
+  throw new ConvexError({ code: "undoRefused", message: `Can't ${verb === "undone" ? "undo" : "redo"} this completion: "Draft" was changed. Nothing was ${verb}.` });
+};
+
+test("undo and redo of a text edit plus completion each go to the server as one call", { concurrency: false }, async () => {
   const dom = installDom();
   const user = userEvent.setup({ document: dom.window.document });
   const calls: string[] = [];
@@ -521,12 +538,37 @@ test("redoing a text edit plus completion passes this tab's text writes to the c
   await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "false/true"));
   await user.click(view.getByTestId("redo"));
   await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
-  assert.deepEqual(calls, ["undoCompletion", "text:Draft", "text:Draft, edited", "redoCompletion"]);
-  // Completion undo left revision 6; the text undo wrote 6 -> 7, the text redo 7 -> 8.
-  assert.deepEqual(JSON.parse(view.getByTestId("redo-writes").textContent ?? "null"), [
-    { nodeId: NODE_ONE, revisionBefore: 6, revision: 7 },
-    { nodeId: NODE_ONE, revisionBefore: 7, revision: 8 },
-  ]);
+  assert.deepEqual(calls, ["undoStep:Draft:r1", "redoStep:Draft, edited:r1"]);
+  cleanup();
+  dom.window.close();
+});
+
+test("a refused redo of a text edit plus completion sends no text write first", { concurrency: false }, async () => {
+  const dom = installDom();
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls: string[] = [];
+  const view = render(<CompoundHarness calls={calls} redoStep={refused("redone")} />);
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
+  await user.click(view.getByTestId("undo"));
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "false/true"));
+  await user.click(view.getByTestId("redo"));
+  await waitFor(() => assert.match(view.getByTestId("message").textContent ?? "", /Nothing was redone/));
+  assert.equal(view.getByTestId("counts").textContent, "false/false");
+  assert.deepEqual(calls, ["undoStep:Draft:r1", "redoStep:Draft, edited:r1"]);
+  cleanup();
+  dom.window.close();
+});
+
+test("a refused undo of a text edit plus completion sends no text write", { concurrency: false }, async () => {
+  const dom = installDom();
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls: string[] = [];
+  const view = render(<CompoundHarness calls={calls} undoStep={refused("undone")} />);
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
+  await user.click(view.getByTestId("undo"));
+  await waitFor(() => assert.match(view.getByTestId("message").textContent ?? "", /Nothing was undone/));
+  assert.equal(view.getByTestId("counts").textContent, "false/false");
+  assert.deepEqual(calls, ["undoStep:Draft:r1"]);
   cleanup();
   dom.window.close();
 });
