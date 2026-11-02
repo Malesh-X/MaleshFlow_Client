@@ -3975,6 +3975,7 @@ export const listUnresolvedPageLinkGroups = query({
       }
     }
 
+    const scanTruncated = pageResult.truncated || nodeResult.truncated;
     return {
       groups: [...groups.values()]
         .sort((left, right) => {
@@ -3990,9 +3991,14 @@ export const listUnresolvedPageLinkGroups = query({
           title: group.title,
           occurrenceCount: group.occurrenceCount,
           nodeCount: group.nodeIds.size,
+          // Only set when the scan was complete, so the single source is certain.
+          soleSourceNodeId:
+            !scanTruncated && group.nodeIds.size === 1
+              ? ([...group.nodeIds][0] as Id<"nodes">)
+              : null,
           samples: group.samples,
         })),
-      scanTruncated: pageResult.truncated || nodeResult.truncated,
+      scanTruncated,
       scannedNodeCount: nodeResult.nodes.length,
     };
   },
@@ -4070,25 +4076,49 @@ async function replaceUnresolvedPageLinksWithTargetBatch(
     text: string;
     occurrenceCount: number;
   }> = [];
+  const isMatchingLink = (link: Parameters<typeof isPlainUnresolvedPageWikiLink>[0]) =>
+    isPlainUnresolvedPageWikiLink(link, activePageSlugs) &&
+    normalizePlainPageWikiLinkTitle(link.targetPageTitle ?? "") === normalizedTitle;
+  const replacementTarget =
+    args.target.kind === "node"
+      ? {
+          kind: "node" as const,
+          ref: targetNode!._id as string,
+          displayText:
+            replaceLinkMarkupWithLabels(targetNode!.text).trim() ||
+            targetNode!.text.trim(),
+        }
+      : {
+          kind: "page" as const,
+          ref: targetPage._id as string,
+        };
+
+  // Never rewrite links inside the target node itself: that would create a
+  // link from a node to itself. Its matching links stay unresolved.
+  let skippedSelfLink: { nodeId: Id<"nodes">; occurrenceCount: number } | null = null;
+  if (targetNode) {
+    const selfReplacement = rewritePlainPageWikiLinksToTarget(
+      targetNode.text,
+      isMatchingLink,
+      replacementTarget,
+    );
+    if (selfReplacement) {
+      skippedSelfLink = {
+        nodeId: targetNode._id,
+        occurrenceCount: selfReplacement.occurrenceCount,
+      };
+    }
+  }
 
   for (const node of nodeResult.nodes) {
+    if (targetNode && node._id === targetNode._id) {
+      continue;
+    }
+
     const replacement = rewritePlainPageWikiLinksToTarget(
       node.text,
-      (link) =>
-        isPlainUnresolvedPageWikiLink(link, activePageSlugs) &&
-        normalizePlainPageWikiLinkTitle(link.targetPageTitle ?? "") === normalizedTitle,
-      args.target.kind === "node"
-        ? {
-            kind: "node",
-            ref: targetNode!._id as string,
-            displayText:
-              replaceLinkMarkupWithLabels(targetNode!.text).trim() ||
-              targetNode!.text.trim(),
-          }
-        : {
-            kind: "page",
-            ref: targetPage._id as string,
-          },
+      isMatchingLink,
+      replacementTarget,
     );
 
     if (!replacement) {
@@ -4139,6 +4169,7 @@ async function replaceUnresolvedPageLinksWithTargetBatch(
     targetKind: args.target.kind,
     targetNodeId: targetNode?._id ?? null,
     targetPageId: targetPage._id,
+    skippedSelfLink,
   };
 }
 

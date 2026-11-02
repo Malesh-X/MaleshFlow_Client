@@ -19,6 +19,8 @@ type UnresolvedPageLinkGroup = {
   title: string;
   occurrenceCount: number;
   nodeCount: number;
+  // Set only when a complete scan found exactly one item using this label.
+  soleSourceNodeId: Id<"nodes"> | null;
   samples: Array<{
     nodeId: Id<"nodes">;
     pageId: Id<"pages">;
@@ -62,6 +64,7 @@ type SelectedLinkTarget =
 type ApplyProgress = {
   nodeCount: number;
   occurrenceCount: number;
+  skippedOccurrenceCount: number;
 };
 
 type UnresolvedLinksPanelProps = {
@@ -237,6 +240,9 @@ export function UnresolvedLinksPanel({
           ownerKey,
           query: debouncedSearchQuery,
           limit: 24,
+          ...(activeGroup.soleSourceNodeId
+            ? { excludeNodeId: activeGroup.soleSourceNodeId }
+            : {}),
         }
       : SKIP,
   ) as LinkTargetSearchResults | undefined;
@@ -266,6 +272,12 @@ export function UnresolvedLinksPanel({
   const effectiveTarget = selectedTarget
     ? getEffectiveReplacementTarget(selectedTarget, useParentTarget && canUseParentTarget)
     : null;
+  // The server never links an item to itself, so a target that is the only
+  // item using this label would resolve nothing.
+  const isSelfOnlyTarget =
+    effectiveTarget?.kind === "node" &&
+    activeGroup?.soleSourceNodeId != null &&
+    effectiveTarget.node._id === activeGroup.soleSourceNodeId;
 
   const summary = useMemo(() => {
     if (typeof groupsResult === "undefined") {
@@ -284,7 +296,13 @@ export function UnresolvedLinksPanel({
   }, [groups, groupsResult]);
 
   const handleApply = useCallback(async () => {
-    if (!activeGroup || !selectedTarget || !effectiveTarget || isApplying) {
+    if (
+      !activeGroup ||
+      !selectedTarget ||
+      !effectiveTarget ||
+      isApplying ||
+      isSelfOnlyTarget
+    ) {
       return;
     }
 
@@ -296,17 +314,26 @@ export function UnresolvedLinksPanel({
         : effectiveTarget !== selectedTarget
           ? "parent item"
           : "item";
-    const confirmation = `Replace every unresolved [[${activeGroup.title}]] with ${replacementMarkup} pointing to ${targetKindLabel} "${targetText}"?`;
+    const selfLinkNote =
+      effectiveTarget.kind === "node"
+        ? " Links inside that item itself stay unchanged."
+        : "";
+    const confirmation = `Replace every unresolved [[${activeGroup.title}]] with ${replacementMarkup} pointing to ${targetKindLabel} "${targetText}"?${selfLinkNote}`;
     if (!window.confirm(confirmation)) {
       return;
     }
 
     setIsApplying(true);
     setError("");
-    setApplyProgress({ nodeCount: 0, occurrenceCount: 0 });
+    setApplyProgress({ nodeCount: 0, occurrenceCount: 0, skippedOccurrenceCount: 0 });
 
     let totalNodes = 0;
     let totalOccurrences = 0;
+    let scanTruncated = false;
+    // Each batch reports the same skipped target, so keep one count per node.
+    const skippedByNodeId = new Map<string, number>();
+    const getSkippedTotal = () =>
+      [...skippedByNodeId.values()].reduce((sum, count) => sum + count, 0);
 
     try {
       for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -328,9 +355,17 @@ export function UnresolvedLinksPanel({
 
         totalNodes += result.replacedNodeCount;
         totalOccurrences += result.replacedOccurrenceCount;
+        scanTruncated = scanTruncated || result.scanTruncated;
+        if (result.skippedSelfLink) {
+          skippedByNodeId.set(
+            result.skippedSelfLink.nodeId as string,
+            result.skippedSelfLink.occurrenceCount,
+          );
+        }
         setApplyProgress({
           nodeCount: totalNodes,
           occurrenceCount: totalOccurrences,
+          skippedOccurrenceCount: getSkippedTotal(),
         });
 
         if (!result.hasMore || result.replacedNodeCount === 0) {
@@ -338,10 +373,30 @@ export function UnresolvedLinksPanel({
         }
       }
 
+      const skippedTotal = getSkippedTotal();
+      const skippedNote =
+        skippedTotal > 0
+          ? `${pluralize(skippedTotal, "link")} inside the target item left unchanged`
+          : "";
+      const truncatedNote = scanTruncated ? "scan limit reached, so some links may remain" : "";
+      if (totalNodes === 0) {
+        const message = skippedTotal > 0
+          ? `Nothing replaced: ${skippedNote}`
+          : "No empty links needed replacing";
+        if (skippedTotal > 0) {
+          setError(`${message}. Choose a different target.`);
+        } else {
+          onApplied(message);
+        }
+        return;
+      }
+
       onApplied(
-        totalNodes > 0
-          ? `Resolved ${pluralize(totalOccurrences, "empty link")} across ${pluralize(totalNodes, "item")}`
-          : "No empty links needed replacing",
+        [
+          `Resolved ${pluralize(totalOccurrences, "empty link")} across ${pluralize(totalNodes, "item")}`,
+          skippedNote,
+          truncatedNote,
+        ].filter((part) => part.length > 0).join("; "),
       );
       setSelectedTarget(null);
       setUseParentTarget(false);
@@ -358,6 +413,7 @@ export function UnresolvedLinksPanel({
     activeGroup,
     effectiveTarget,
     isApplying,
+    isSelfOnlyTarget,
     onApplied,
     ownerKey,
     replaceUnresolvedPageLinksWithTarget,
@@ -568,6 +624,14 @@ export function UnresolvedLinksPanel({
               {applyProgress ? (
                 <p className="text-sm text-[var(--workspace-text-subtle)]">
                   Replaced {pluralize(applyProgress.occurrenceCount, "occurrence")} across {pluralize(applyProgress.nodeCount, "item")}.
+                  {applyProgress.skippedOccurrenceCount > 0
+                    ? ` Left ${pluralize(applyProgress.skippedOccurrenceCount, "link")} inside the target item unchanged.`
+                    : ""}
+                </p>
+              ) : null}
+              {isSelfOnlyTarget ? (
+                <p className="text-sm text-[var(--workspace-text-subtle)]">
+                  This item is the only one using [[{activeGroup.title}]], so it can’t link to itself. Choose a different target.
                 </p>
               ) : null}
               {error ? (
@@ -594,10 +658,10 @@ export function UnresolvedLinksPanel({
                   onClick={() => {
                     void handleApply();
                   }}
-                  disabled={!selectedTarget || isApplying}
+                  disabled={!selectedTarget || isApplying || isSelfOnlyTarget}
                   className={clsx(
                     "border px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] transition",
-                    !selectedTarget || isApplying
+                    !selectedTarget || isApplying || isSelfOnlyTarget
                       ? "cursor-not-allowed border-[var(--workspace-border)] text-[var(--workspace-text-faint)] opacity-60"
                       : "border-[var(--workspace-accent)] text-[var(--workspace-accent)] hover:bg-[var(--workspace-accent)]/10",
                   )}
