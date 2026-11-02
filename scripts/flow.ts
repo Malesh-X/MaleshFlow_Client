@@ -4,7 +4,7 @@
 //   npx tsx scripts/flow.ts <command> [args] [--prod --yes]
 //
 // Target: dev deployment from .env.local by default. --prod targets
-// production (needs MALESHFLOW_PROD_URL) and refuses writes without --yes.
+// production (override with MALESHFLOW_PROD_URL) and refuses writes without --yes.
 // Owner key: MALESHFLOW_OWNER_KEY, else read via `npx convex env get`.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -56,7 +56,7 @@ function fail(message: string): never {
 
 function deploymentUrl() {
   if (prod) {
-    return process.env.MALESHFLOW_PROD_URL ?? fail("Set MALESHFLOW_PROD_URL (e.g. https://<name>.convex.cloud) to use --prod.");
+    return process.env.MALESHFLOW_PROD_URL ?? "https://precise-coyote-972.convex.cloud";
   }
   const env = readFileSync(new URL("../.env.local", import.meta.url), "utf8");
   return env.match(/^NEXT_PUBLIC_CONVEX_URL=(\S+)/m)?.[1] ?? fail("NEXT_PUBLIC_CONVEX_URL missing from .env.local");
