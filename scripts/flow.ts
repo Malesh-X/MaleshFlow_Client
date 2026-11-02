@@ -1,101 +1,211 @@
 // MaleshFlow CLI: read and change workspace data through the same Convex
 // functions the app uses (so links, embeddings and AI hooks still run).
-//
-//   npx tsx scripts/flow.ts <command> [args] [--prod --yes]
-//
-// Target: dev deployment from .env.local by default. --prod targets
-// production (override with MALESHFLOW_PROD_URL) and refuses writes without --yes.
-// Owner key: MALESHFLOW_OWNER_KEY, else read via `npx convex env get`.
+// Usage and examples: docs/flow-cli.md, or `npm run -s flow -- help`.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 
-const HELP = `Commands:
-  pages                                  List pages (id, title)
-  tree <pageId>                          Print a page's outline with node ids
-  add-page <title> [--section Notes]     Create a page
-  add <pageId> <text> [--parent id] [--after id|top] [--task] [--due YYYY-MM-DD]
-                                         (appends to the end unless --after is given)
-  add-outline <pageId> <file|->          Append a markdown outline ("- item", "- [ ] task",
-                                         2-space indent nests) in one batch
-  rename-page <pageId> <title>
-  update <nodeId> [--text t] [--status todo|in_progress|done|cancelled]
-                  [--due YYYY-MM-DD|none] [--task|--note]
-  done <nodeId>                          Mark a task done
-  archive <nodeId>                       Archive a node
-  run <query|mutation> <module:fn> [json] Call any function (ownerKey added)
-Flags: --prod (production; writes also need --yes), --json (raw output),
-       --dry-run (print the write instead of sending it)`;
+type Spec = { args: string[]; optional?: string[]; flags?: string[]; usage: string };
 
+const GLOBAL_FLAGS = ["prod", "yes", "dry-run", "json"];
+const BOOLEAN_FLAGS = new Set([...GLOBAL_FLAGS, "task", "note"]);
+const COMMANDS: Record<string, Spec> = {
+  pages: { args: [], usage: "pages                                  List pages (id, title)" },
+  tree: { args: ["pageId"], usage: "tree <pageId>                          Print a page outline with node ids" },
+  "add-page": { args: ["title..."], flags: ["section"], usage: "add-page <title> [--section Notes]     Create a page" },
+  "rename-page": { args: ["pageId", "title..."], usage: "rename-page <pageId> <title>           Rename a page" },
+  add: {
+    args: ["pageId", "text..."],
+    flags: ["parent", "after", "task", "due", "time"],
+    usage:
+      "add <pageId> <text> [--parent id] [--after id|top] [--task] [--due YYYY-MM-DD [--time HH:MM]]\n" +
+      "                                         Add a node (appends to the end by default)",
+  },
+  "add-outline": {
+    args: ["pageId", "file"],
+    usage: "add-outline <pageId> <file|->          Append a markdown outline in one batch",
+  },
+  update: {
+    args: ["nodeId"],
+    flags: ["text", "status", "due", "time", "priority", "recur", "task", "note"],
+    usage:
+      "update <nodeId> [--text t] [--status todo|in_progress|done|cancelled] [--due YYYY-MM-DD|none]\n" +
+      "                [--time HH:MM|none] [--priority low|medium|high|none]\n" +
+      "                [--recur daily|weekly|monthly|yearly|<n>d|<n>w|<n>m|<n>y|none] [--task|--note]",
+  },
+  done: { args: ["nodeId"], usage: "done <nodeId>                          Mark a task done" },
+  move: {
+    args: ["nodeId"],
+    flags: ["page", "parent", "after"],
+    usage:
+      "move <nodeId> [--page id] [--parent id|root] [--after id|top]\n" +
+      "                                         Move a node (and its children); appends by default",
+  },
+  archive: { args: ["nodeId"], usage: "archive <nodeId>                       Archive (hide) a node" },
+  unarchive: { args: ["nodeId"], usage: "unarchive <nodeId>                     Restore an archived node" },
+  run: {
+    args: ["query|mutation", "module:fn"],
+    optional: ["json"],
+    usage: "run <query|mutation> <module:fn> [json] Call a public query or mutation (ownerKey added)",
+  },
+};
+
+const HELP = `Usage: npm run -s flow -- <command> [args] [flags]
+
+Commands:
+${Object.values(COMMANDS)
+  .map((spec) => `  ${spec.usage}`)
+  .join("\n")}
+
+Flags: --prod (production; writes also need --yes), --dry-run (print the write, don't send),
+       --json (raw output for pages/tree). Docs: docs/flow-cli.md`;
+
+function fail(message: string): never {
+  console.error(message);
+  return process.exit(1);
+}
+
+// ---- argument parsing (all checks happen before any network call) ----
 const argv = process.argv.slice(2);
 const flags: Record<string, string | boolean> = {};
 const positional: string[] = [];
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i];
-  if (arg.startsWith("--")) {
+  if (arg === "-h" || arg === "--help") {
+    flags.help = true;
+  } else if (arg.startsWith("--")) {
     const name = arg.slice(2);
-    const next = argv[i + 1];
-    if (next !== undefined && !next.startsWith("--") && !["prod", "yes", "json", "task", "note", "dry-run"].includes(name)) {
-      flags[name] = next;
-      i++;
-    } else {
+    if (BOOLEAN_FLAGS.has(name)) {
       flags[name] = true;
+    } else {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) fail(`--${name} needs a value.`);
+      flags[name] = value;
+      i++;
     }
   } else {
     positional.push(arg);
   }
 }
 const [command, ...rest] = positional;
+
+if (!command || command === "help" || flags.help) {
+  console.log(HELP);
+  process.exit(0);
+}
+const spec = COMMANDS[command] ?? fail(`Unknown command "${command}". Run with "help" to list commands.`);
+for (const name of Object.keys(flags)) {
+  if (!GLOBAL_FLAGS.includes(name) && !spec.flags?.includes(name)) {
+    fail(`Unknown flag --${name} for "${command}".\nUsage: ${spec.usage}`);
+  }
+}
+const required = spec.args.length;
+const variadic = spec.args.at(-1)?.endsWith("...");
+const maxArgs = variadic ? Infinity : required + (spec.optional?.length ?? 0);
+if (rest.length < required || rest.length > maxArgs) {
+  fail(`Wrong number of arguments for "${command}".\nUsage: ${spec.usage}`);
+}
+const str = (name: string) => (typeof flags[name] === "string" ? (flags[name] as string) : undefined);
+const oneOf = (name: string, allowed: string[]) => {
+  const value = str(name);
+  if (value !== undefined && !allowed.includes(value)) fail(`--${name} must be one of: ${allowed.join(", ")}`);
+  return value;
+};
 const prod = Boolean(flags.prod);
 
-function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
-}
-
-function deploymentUrl() {
-  if (prod) {
-    return process.env.MALESHFLOW_PROD_URL ?? "https://precise-coyote-972.convex.cloud";
-  }
-  const env = readFileSync(new URL("../.env.local", import.meta.url), "utf8");
-  return env.match(/^NEXT_PUBLIC_CONVEX_URL=(\S+)/m)?.[1] ?? fail("NEXT_PUBLIC_CONVEX_URL missing from .env.local");
-}
-
-function ownerKey() {
-  if (process.env.MALESHFLOW_OWNER_KEY) return process.env.MALESHFLOW_OWNER_KEY;
-  const out = execFileSync("npx", ["convex", "env", "get", "OWNER_ACCESS_TOKEN", ...(prod ? ["--prod"] : [])], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
-  return out || fail("Could not read OWNER_ACCESS_TOKEN; set MALESHFLOW_OWNER_KEY.");
-}
-
-function parseDue(value: string | boolean | undefined) {
+// Due dates are midnight in this machine's time zone, like dates picked in the app.
+function parseDue(value: string | undefined) {
   if (value === undefined) return undefined;
   if (value === "none") return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(`Bad date "${value}"; use YYYY-MM-DD or none.`);
   const ms = Date.parse(`${value}T00:00:00`);
-  return Number.isNaN(ms) ? fail(`Bad date: ${value}`) : ms;
+  return Number.isNaN(ms) ? fail(`Bad date "${value}".`) : ms;
 }
 
-const client = new ConvexHttpClient(deploymentUrl());
-const key = ownerKey();
+function parseTime(value: string | undefined) {
+  if (value === undefined) return {};
+  if (value === "none") return { dueTime: null, dueTimeZone: null };
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) fail(`Bad time "${value}"; use 24-hour HH:MM or none.`);
+  return { dueTime: value, dueTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+}
+
+function parseRecur(value: string | undefined) {
+  if (value === undefined) return undefined;
+  if (value === "none") return null;
+  if (["daily", "weekly", "monthly", "yearly"].includes(value)) return value;
+  const match = value.match(/^(\d+)([dwmy])$/);
+  if (!match || Number(match[1]) < 1) fail(`Bad --recur "${value}"; use daily|weekly|monthly|yearly, <n>d|w|m|y, or none.`);
+  const unit = { d: "day", w: "week", m: "month", y: "year" }[match[2] as "d" | "w" | "m" | "y"];
+  return { interval: Number(match[1]), unit };
+}
+
+// ---- connection (created only once a valid command needs it) ----
+function deploymentUrl() {
+  if (prod) return process.env.MALESHFLOW_PROD_URL ?? "https://precise-coyote-972.convex.cloud";
+  let env = "";
+  try {
+    env = readFileSync(new URL("../.env.local", import.meta.url), "utf8");
+  } catch {
+    fail("No .env.local found. Run `npx convex dev --once` to create it, or use --prod.");
+  }
+  return env.match(/^NEXT_PUBLIC_CONVEX_URL=(\S+)/m)?.[1] ?? fail("NEXT_PUBLIC_CONVEX_URL missing from .env.local.");
+}
+
+function readOwnerKey() {
+  if (process.env.MALESHFLOW_OWNER_KEY) return process.env.MALESHFLOW_OWNER_KEY;
+  try {
+    const out = execFileSync("npx", ["convex", "env", "get", "OWNER_ACCESS_TOKEN", ...(prod ? ["--prod"] : [])], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (out) return out;
+  } catch {
+    // fall through to the message below
+  }
+  return fail(
+    "Could not read OWNER_ACCESS_TOKEN. Run `npx convex login` (and check the token is set with " +
+      `\`npx convex env list${prod ? " --prod" : ""}\`), or set MALESHFLOW_OWNER_KEY.`,
+  );
+}
+
+let connection: { client: ConvexHttpClient; key: string } | undefined;
+function connect() {
+  connection ??= { client: new ConvexHttpClient(deploymentUrl()), key: readOwnerKey() };
+  return connection;
+}
 const fn = (path: string) => {
   const [mod, name] = path.split(":");
+  if (!mod || !name) fail(`Function must look like module:name, got "${path}".`);
   return anyApi[mod][name];
 };
-const query = (path: string, args: object = {}) => client.query(fn(path), { ownerKey: key, ...args });
-const mutation = async (path: string, args: object = {}) => {
+const query = (path: string, args: object = {}) => {
+  const { client, key } = connect();
+  return client.query(fn(path), { ownerKey: key, ...args });
+};
+// --dry-run prints the write and exits. It is not validated by the backend,
+// and it may still read live data first (e.g. to find where to append).
+const mutation = (path: string, args: object = {}) => {
   if (flags["dry-run"]) {
     console.log(`[dry-run] ${path} ${JSON.stringify(args, null, 2)}`);
-    process.exit(0);
+    return process.exit(0);
   }
-  if (prod && !flags.yes) fail("Refusing to write to production without --yes.");
+  if (prod && !flags.yes) fail("Refusing to write to production without --yes (try --dry-run first).");
+  const { client, key } = connect();
   return client.mutation(fn(path), { ownerKey: key, ...args });
 };
 const print = (value: unknown) => console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
 
-type TreeNode = { _id: string; parentNodeId: string | null; position: number; text: string; kind: string; taskStatus: string | null; archived: boolean };
+type TreeNode = {
+  _id: string;
+  pageId: string;
+  parentNodeId: string | null;
+  position: number;
+  text: string;
+  kind: string;
+  taskStatus: string | null;
+  archived: boolean;
+};
 
 async function loadTree(pageId: string) {
   const result = (await query("workspace:getPageTree", { pageId })) as { page: { title: string }; nodes: TreeNode[] } | null;
@@ -103,9 +213,9 @@ async function loadTree(pageId: string) {
 }
 
 // Last visible child under `parent`, so new items append instead of landing on top.
-async function lastChildId(pageId: string, parent: string | null) {
+async function lastChildId(pageId: string, parent: string | null, exclude?: string) {
   const { nodes } = await loadTree(pageId);
-  const siblings = nodes.filter((n) => !n.archived && n.parentNodeId === parent);
+  const siblings = nodes.filter((n) => !n.archived && n.parentNodeId === parent && n._id !== exclude);
   siblings.sort((a, b) => a.position - b.position);
   return siblings.at(-1)?._id ?? null;
 }
@@ -140,6 +250,7 @@ async function main() {
     case "pages": {
       const pages = (await query("workspace:listPages")) as { _id: string; title: string }[];
       if (flags.json) return print(pages);
+      if (!pages.length) console.error(prod ? "No pages." : "No pages on dev (the dev deployment is often empty; real data is on --prod).");
       for (const page of pages) console.log(`${page._id}  ${page.title}`);
       return;
     }
@@ -164,61 +275,106 @@ async function main() {
       return;
     }
     case "add-page":
-      return print(await mutation("workspace:createPage", { title: rest.join(" "), ...(flags.section ? { sidebarSection: flags.section } : {}) }));
+      return print(await mutation("workspace:createPage", { title: rest.join(" "), ...(str("section") ? { sidebarSection: str("section") } : {}) }));
+    case "rename-page":
+      await mutation("workspace:renamePage", { pageId: rest[0], title: rest.slice(1).join(" ") });
+      return console.log("ok");
     case "add": {
       const [pageId, ...text] = rest;
-      return print(
-        await mutation("workspace:createNode", {
-          pageId,
-          text: text.join(" "),
-          ...(flags.parent ? { parentNodeId: flags.parent } : {}),
-          afterNodeId:
-            flags.after === "top"
-              ? null
-              : typeof flags.after === "string"
-                ? flags.after
-                : await lastChildId(pageId, typeof flags.parent === "string" ? flags.parent : null),
-          ...(flags.task || flags.due ? { kind: "task", taskStatus: "todo" } : {}),
-          ...(flags.due ? { dueAt: parseDue(flags.due) } : {}),
-        }),
-      );
+      const parent = str("parent") ?? null;
+      const dueAt = parseDue(str("due"));
+      if (str("time") && dueAt == null) fail("--time needs --due.");
+      const afterNodeId = str("after") === "top" ? null : (str("after") ?? (await lastChildId(pageId, parent)));
+      const isTask = Boolean(flags.task) || dueAt != null;
+      const nodeId = await mutation("workspace:createNode", {
+        pageId,
+        text: text.join(" "),
+        ...(parent ? { parentNodeId: parent } : {}),
+        afterNodeId,
+        ...(isTask ? { kind: "task", taskStatus: "todo" } : {}),
+        ...(dueAt != null ? { dueAt } : {}),
+      });
+      // createNode has no time arguments, so set the time in a second write.
+      if (str("time")) await mutation("workspace:updateNode", { nodeId, dueAt, ...parseTime(str("time")) });
+      return print(nodeId);
     }
     case "add-outline": {
       const [pageId, file] = rest;
-      if (!file) fail("Usage: add-outline <pageId> <file|->");
       const nodes = parseOutline(readFileSync(file === "-" ? 0 : file, "utf8"));
-      if (!nodes.length) fail("No outline items found.");
+      if (!nodes.length) fail("No outline items found (lines must start with - or *).");
       const after = await lastChildId(pageId, null);
       if (after) nodes[0].afterNodeId = after;
       return print(await mutation("workspace:createNodesBatch", { pageId, nodes }));
     }
-    case "rename-page":
-      await mutation("workspace:renamePage", { pageId: rest[0], title: rest.slice(1).join(" ") });
-      return console.log("ok");
     case "update": {
       const args: Record<string, unknown> = { nodeId: rest[0] };
-      if (typeof flags.text === "string") args.text = flags.text;
-      if (typeof flags.status === "string") args.taskStatus = flags.status;
-      if (flags.due !== undefined) args.dueAt = parseDue(flags.due);
+      if (str("text") !== undefined) args.text = str("text");
+      const status = oneOf("status", ["todo", "in_progress", "done", "cancelled"]);
+      if (status) args.taskStatus = status;
+      const priority = oneOf("priority", ["low", "medium", "high", "none"]);
+      if (priority) args.priority = priority === "none" ? null : priority;
+      const dueAt = parseDue(str("due"));
+      if (dueAt !== undefined) args.dueAt = dueAt;
+      Object.assign(args, parseTime(str("time")));
+      const recur = parseRecur(str("recur"));
+      if (recur !== undefined) args.recurrenceFrequency = recur;
+      if (flags.task && flags.note) fail("Use --task or --note, not both.");
       if (flags.task) args.kind = "task";
       if (flags.note) args.kind = "note";
+      if (Object.keys(args).length === 1) fail(`Nothing to update.\nUsage: ${spec.usage}`);
       await mutation("workspace:updateNode", args);
       return console.log("ok");
     }
     case "done":
       await mutation("workspace:updateNode", { nodeId: rest[0], taskStatus: "done" });
       return console.log("ok");
+    case "move": {
+      const parentFlag = str("parent");
+      const args: Record<string, unknown> = { nodeId: rest[0] };
+      if (str("page")) args.pageId = str("page");
+      if (parentFlag) args.parentNodeId = parentFlag === "root" ? null : parentFlag;
+      if (!str("page") && !parentFlag && !str("after")) fail(`Say where to move it.\nUsage: ${spec.usage}`);
+      if (str("after") === "top") {
+        args.afterNodeId = null;
+      } else if (str("after")) {
+        args.afterNodeId = str("after");
+      } else {
+        // Append at the end of the destination. Without --parent, a move to
+        // another page lands at its root; a move within the page keeps the parent.
+        const pageId = (args.pageId as string | undefined) ?? fail("Use --after with --parent alone, or pass --page.");
+        const parent = parentFlag && parentFlag !== "root" ? parentFlag : null;
+        if (parentFlag === undefined) args.parentNodeId = null;
+        args.afterNodeId = await lastChildId(pageId, parent, rest[0]);
+      }
+      await mutation("workspace:moveNode", args);
+      return console.log("ok");
+    }
     case "archive":
-      await mutation("workspace:archiveNode", { nodeId: rest[0] });
+    case "unarchive":
+      await mutation("workspace:archiveNode", { nodeId: rest[0], archived: command === "archive" });
       return console.log("ok");
     case "run": {
       const [kind, path, json] = rest;
-      const args = json ? JSON.parse(json) : {};
+      if (kind !== "query" && kind !== "mutation") fail('run takes "query" or "mutation" (actions are not supported).');
+      let args: object = {};
+      if (json) {
+        try {
+          args = JSON.parse(json);
+        } catch {
+          fail("The json argument is not valid JSON.");
+        }
+      }
       return print(kind === "mutation" ? await mutation(path, args) : await query(path, args));
     }
-    default:
-      console.log(HELP);
   }
 }
 
-main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+main().catch((error) => {
+  let message = error instanceof Error ? error.message : String(error);
+  // Convex validation errors echo the call's arguments, including the key.
+  if (connection?.key) message = message.split(connection.key).join("<ownerKey>");
+  if (/Invalid owner access token/.test(message)) {
+    fail(`${message}\nThe key doesn't match ${prod ? "production" : "dev"}. Check MALESHFLOW_OWNER_KEY or the deployment's OWNER_ACCESS_TOKEN.`);
+  }
+  fail(message);
+});
