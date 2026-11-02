@@ -111,7 +111,14 @@ import {
 import { changeForUpdate } from "./lib/guardRules";
 import { isValidTimeZone } from "../lib/domain/timeZone";
 import { withNextSourceOccurrence } from "../lib/domain/planner";
-import { getNodeMeta, isNodeCompleted, isPlannerCompletionItem, isTaskPageWithDoneArchive, primarySectionSlot } from "../lib/domain/workspaceRules";
+import {
+  getNodeMeta,
+  isNodeCompleted,
+  isPlannerCompletionItem,
+  isTaskPageWithDoneArchive,
+  pageTypeForSection,
+  primarySectionSlot,
+} from "../lib/domain/workspaceRules";
 import { readWorkspaceSettings, workspaceTimeZoneFor, writeWorkspaceSettings } from "./lib/workspaceSettings";
 
 function getTimestamp() {
@@ -4878,6 +4885,10 @@ export const createPage = mutation({
     const ctx = withGuards(rawCtx, "workspace:createPage");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
+    // No page type given: the one the app's + button picks for the section
+    // (Phase 3, change 5), so pages made elsewhere still get their sections.
+    const sidebarSection = args.sidebarSection ?? "Tasks";
+    const pageType = args.pageType ?? pageTypeForSection(sidebarSection);
 
     const pages = await ctx.db
       .query("pages")
@@ -4909,14 +4920,14 @@ export const createPage = mutation({
       position,
       sourceMeta: {
         sourceType: "manual",
-        sidebarSection: args.sidebarSection ?? "Tasks",
-        pageType: args.pageType ?? "default",
+        sidebarSection,
+        pageType,
       },
       createdAt: now,
       updatedAt: now,
     });
 
-    if (args.pageType === "model") {
+    if (pageType === "model") {
       await ctx.db.insert("nodes", {
         pageId,
         parentNodeId: null,
@@ -4956,7 +4967,7 @@ export const createPage = mutation({
       });
     }
 
-    if (args.pageType === "task") {
+    if (pageType === "task") {
       await ctx.db.insert("nodes", {
         pageId,
         parentNodeId: null,
@@ -4977,14 +4988,14 @@ export const createPage = mutation({
       });
     }
 
-    if (args.pageType === "planner") {
+    if (pageType === "planner") {
       const plannerPage = await ctx.db.get(pageId);
       if (plannerPage) {
         await ensurePlannerSections(ctx, plannerPage);
       }
     }
 
-    if (args.pageType === "journal") {
+    if (pageType === "journal") {
       const journalPage = await ctx.db.get(pageId);
       if (journalPage) {
         await ensureJournalSections(ctx, journalPage);
@@ -4994,28 +5005,28 @@ export const createPage = mutation({
       }
     }
 
-    if (args.pageType === "scratchpad") {
+    if (pageType === "scratchpad") {
       const scratchpadPage = await ctx.db.get(pageId);
       if (scratchpadPage) {
         await ensureScratchpadSections(ctx, scratchpadPage);
       }
     }
 
-    if (args.pageType === "note") {
+    if (pageType === "note") {
       const notePage = await ctx.db.get(pageId);
       if (notePage) {
         await ensureNoteSections(ctx, notePage);
       }
     }
 
-    if ((args.pageType ?? "default") === "default" && args.sidebarSection === "Templates") {
+    if (pageType === "default" && sidebarSection === "Templates") {
       const templatePage = await ctx.db.get(pageId);
       if (templatePage) {
         await ensureTemplateSections(ctx, templatePage);
       }
     }
 
-    if (args.pageType === "multiPage") {
+    if (pageType === "multiPage") {
       const multiPage = await ctx.db.get(pageId);
       if (multiPage) {
         await ensureMultiPageSections(ctx, multiPage);
