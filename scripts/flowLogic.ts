@@ -114,6 +114,21 @@ export function findSectionNode(nodes: TreeNode[], slot: string) {
   return nodes.find((node) => !node.archived && node.parentNodeId === null && metaOf(node).sectionSlot === slot) ?? null;
 }
 
+// Page types whose sidebar section gives them sections; a "default" page there
+// was created without its type (old CLI add-page) and never got them.
+const TYPED_SECTIONS: Partial<Record<SidebarSection, PageType>> = {
+  Models: "model",
+  Journal: "journal",
+  Views: "multiPage",
+  Scratchpads: "scratchpad",
+};
+export function isUntypedSectionPage(page: PageDoc) {
+  const meta = metaOf(page);
+  const section = meta.sidebarSection as SidebarSection;
+  if (!TYPED_SECTIONS[section] || meta.specialPage === "sidebar") return false;
+  return meta.pageType === undefined || meta.pageType === null || meta.pageType === "default";
+}
+
 // ---- nodes ----
 
 // Mirrors isNodeLocked in WorkspaceApp.tsx: section headers and planner days.
@@ -233,5 +248,30 @@ export function kindChangeArgs(node: TreeNode, kind: "task" | "note") {
     dueAt: null,
     dueEndAt: null,
     recurrenceFrequency: null,
+  };
+}
+
+// ---- doctor checks (read-only) ----
+
+export type DoctorFinding = { pageId: string; pageTitle: string; nodeId?: string; text: string; detail?: string };
+
+export const noteHasTaskStatus = (node: TreeNode) => !node.archived && node.kind !== "task" && node.taskStatus !== null && node.taskStatus !== undefined;
+export const recurringWithoutDue = (node: TreeNode) => !node.archived && metaOf(node).recurrenceFrequency != null && !node.dueAt;
+export const endNotAfterDue = (node: TreeNode) =>
+  !node.archived && node.dueEndAt != null && (node.dueAt == null || node.dueEndAt <= node.dueAt);
+
+export function nodeChecks(page: PageDoc, nodes: TreeNode[]) {
+  const finding = (node: TreeNode, detail?: string): DoctorFinding => ({
+    pageId: page._id,
+    pageTitle: page.title,
+    nodeId: node._id,
+    text: node.text,
+    ...(detail ? { detail } : {}),
+  });
+  const day = (ms: number | null | undefined) => (ms ? timestampToDateInputValue(ms) : "none");
+  return {
+    notesWithTaskStatus: nodes.filter(noteHasTaskStatus).map((node) => finding(node, `taskStatus ${node.taskStatus}`)),
+    recurringWithoutDue: nodes.filter(recurringWithoutDue).map((node) => finding(node, JSON.stringify(metaOf(node).recurrenceFrequency))),
+    endNotAfterDue: nodes.filter(endNotAfterDue).map((node) => finding(node, `due ${day(node.dueAt)}, end ${day(node.dueEndAt)}`)),
   };
 }

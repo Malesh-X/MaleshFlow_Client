@@ -17,12 +17,15 @@ import {
   isNodeCompleted,
   isNodeLocked,
   isPlannerCompletionItem,
+  isUntypedSectionPage,
   kindChangeArgs,
   metaOf,
+  nodeChecks,
   parseDueDate,
   primarySectionSlot,
   scheduleForDue,
   validateParent,
+  type DoctorFinding,
   type PageDoc,
   type SidebarSection,
   type TreeNode,
@@ -79,6 +82,11 @@ const COMMANDS: Record<string, Spec> = {
   },
   archive: { args: ["nodeId"], usage: "archive <nodeId>                       Archive (hide) a node and its branch" },
   unarchive: { args: ["nodeId"], usage: "unarchive <nodeId>                     Restore an archived node and its branch" },
+  doctor: {
+    args: [],
+    flags: ["limit"],
+    usage: "doctor [--limit 5]                     Read-only data check (stray items, untyped pages, bad schedules)",
+  },
   run: {
     args: ["query|mutation", "module:fn"],
     optional: ["json"],
@@ -94,7 +102,7 @@ ${Object.values(COMMANDS)
   .join("\n")}
 
 Flags: --prod (production; writes also need --yes), --dry-run (print the writes, don't send),
-       --json (raw output for pages/tree). Docs: docs/flow-cli.md`;
+       --json (raw output for pages/tree/doctor). Docs: docs/flow-cli.md`;
 
 function fail(message: string): never {
   console.error(message);
@@ -370,6 +378,85 @@ async function printStrays(pageId: string, nodes: TreeNode[], walk: (parent: str
   }
 }
 
+// ---- doctor (read-only) ----
+async function mapLimit<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>) {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await run(items[index]);
+      }
+    }),
+  );
+  return results;
+}
+
+async function doctor() {
+  const limitValue = str("limit") ?? "5";
+  if (!/^\d+$/.test(limitValue)) fail("--limit must be a whole number.");
+  const limit = Number(limitValue);
+  const pages = (await query("workspace:listPages")) as PageDoc[];
+  const report = {
+    pagesChecked: pages.length,
+    strayItems: [] as DoctorFinding[],
+    untypedPages: pages
+      .filter(isUntypedSectionPage)
+      .map((page) => ({ pageId: page._id, pageTitle: page.title, text: page.title, detail: `section ${metaOf(page).sidebarSection}, pageType ${metaOf(page).pageType ?? "unset"}` })),
+    notesWithTaskStatus: [] as DoctorFinding[],
+    recurringWithoutDue: [] as DoctorFinding[],
+    endNotAfterDue: [] as DoctorFinding[],
+    partiallyLoadedPages: [] as DoctorFinding[],
+  };
+  const strays: { page: PageDoc; node: TreeNode }[] = [];
+  let done = 0;
+  await mapLimit(pages, 6, async (page) => {
+    const tree = (await query("workspace:getPageTree", { pageId: page._id })) as PageTree | null;
+    if (++done % 25 === 0) console.error(`checked ${done}/${pages.length} pages...`);
+    if (!tree) return;
+    // Only node-loading warnings matter here; partial backlink counts don't.
+    if (tree.loadWarning && /too large to load|could not be loaded/.test(tree.loadWarning)) report.partiallyLoadedPages.push({ pageId: page._id, pageTitle: page.title, text: page.title, detail: tree.loadWarning });
+    const checks = nodeChecks(page, tree.nodes);
+    report.notesWithTaskStatus.push(...checks.notesWithTaskStatus);
+    report.recurringWithoutDue.push(...checks.recurringWithoutDue);
+    report.endNotAfterDue.push(...checks.endNotAfterDue);
+    for (const node of findStrayNodes(tree.nodes)) strays.push({ page, node });
+  });
+
+  const parentIds = [...new Set(strays.map((s) => s.node.parentNodeId!))];
+  const parents = new Map<string, NodeInfo>();
+  for (let i = 0; i < parentIds.length; i += 25) {
+    for (const [id, info] of await resolveNodes(parentIds.slice(i, i + 25))) parents.set(id, info);
+  }
+  const titles = new Map(pages.map((p) => [p._id, p.title]));
+  for (const { page, node } of strays) {
+    const parent = parents.get(node.parentNodeId!) ?? null;
+    const why = classifyStrayParent(page._id, parent);
+    if (why === "notLoaded") continue;
+    const where = why === "otherPage" ? ` (on "${titles.get(parent!.pageId!) ?? parent!.pageId}")` : "";
+    report.strayItems.push({ pageId: page._id, pageTitle: page.title, nodeId: node._id, text: node.text, detail: `parent ${node.parentNodeId} ${why}${where}` });
+  }
+
+  if (flags.json) return print(report);
+  const sections: [string, DoctorFinding[]][] = [
+    ["Stray items (active, parent archived, missing or on another page)", report.strayItems],
+    ["Pages under Models/Journal/Views/Scratchpads still typed default", report.untypedPages],
+    ["Notes with a task status", report.notesWithTaskStatus],
+    ["Recurring items with no due date", report.recurringWithoutDue],
+    ["End date not after the due date", report.endNotAfterDue],
+    ["Pages too large to check fully (results above may be incomplete)", report.partiallyLoadedPages],
+  ];
+  console.log(`Checked ${report.pagesChecked} active pages on ${prod ? "production" : "dev"}. Read-only: nothing was changed.\n`);
+  for (const [title, findings] of sections) {
+    console.log(`${title}: ${findings.length}`);
+    for (const f of findings.slice(0, limit)) {
+      console.log(`  - "${f.pageTitle}" (${f.pageId})${f.nodeId ? ` ${f.nodeId}: ${JSON.stringify(f.text.slice(0, 60))}` : ""}${f.detail ? ` [${f.detail}]` : ""}`);
+    }
+    if (findings.length > limit) console.log(`  ... and ${findings.length - limit} more (--limit or --json for all)`);
+  }
+}
+
 async function main() {
   switch (command) {
     case "pages": {
@@ -542,6 +629,8 @@ async function main() {
       await mutation("workspace:setNodeTreeArchived", { nodeId: rest[0], archived: false });
       return ok();
     }
+    case "doctor":
+      return doctor();
     case "run": {
       const [kind, path, json] = rest;
       if (kind !== "query" && kind !== "mutation") fail('run takes "query" or "mutation" (actions are not supported).');

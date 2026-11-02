@@ -29,7 +29,7 @@ npm run -s flow -- help        # works offline, no credentials needed
 | `--prod` | Production (`precise-coyote-972`, override with `MALESHFLOW_PROD_URL`). This is the real workspace. |
 | `--yes` | Required for any write with `--prod`. |
 | `--dry-run` | Prints each Convex function and arguments a write would send, without sending. Commands that make two writes print both. |
-| `--json` | Raw JSON output for `pages` and `tree`. |
+| `--json` | Raw JSON output for `pages`, `tree` and `doctor`. |
 
 What `--dry-run` does **not** do: it doesn't validate the write against the
 backend (bad ids or values only fail on the real run), and it still needs
@@ -74,6 +74,7 @@ Convex login. Never print, log or commit the key. The CLI replaces it with
 | &nbsp;&nbsp;`--parent <nodeId>\|root` | New parent, on the destination page. Refused if it's the item itself or inside it. |
 | &nbsp;&nbsp;`--after <nodeId>\|top` | Exact position among the new siblings (`--after <id>` also sets the parent). |
 | `archive <nodeId>` / `unarchive <nodeId>` | Hide or restore a node and its whole branch (`setNodeTreeArchived`, as in the app). Section headers and planner days can't be archived. Unarchive is refused when the parent is archived too; unarchive the parent instead. |
+| `doctor [--limit 5]` | Read-only data check across all active pages (see below). Prints counts and a few examples per check; `--json` prints everything. |
 | `run query\|mutation <module:fn> '<json>'` | Call a public Convex query or mutation; `ownerKey` is added for you. Actions are not supported. Functions live in `convex/*.ts`; check the `args` validator there for names and types. |
 
 Unknown commands, unknown flags, missing arguments and bad values are rejected
@@ -94,6 +95,23 @@ The dry run prints which path it picked. `update --status done` takes the same
 path. An item that is already done (or already archived by a completion) is
 left alone and the CLI says so; neither command ever reopens a task. To reopen
 a plain task, use `update --status todo`.
+
+### `doctor` checks
+
+`doctor` only reads (`listPages`, `getPageTree`, `resolveNodeLinks`) and never
+writes, so it needs no `--yes`. It reports:
+
+| Check | Means |
+| --- | --- |
+| Stray items | Active items whose parent is archived, missing or on another page. The app can't show them under a parent. |
+| Untyped pages | Pages in Models, Journal, Views or Scratchpads still typed `default`, so they never got their sections. |
+| Notes with a task status | A note carrying `todo`/`done`. |
+| Recurring items with no due date | Recurrence set but nothing to roll forward from. |
+| End date not after the due date | `dueEndAt` on or before `dueAt`, or with no due date. |
+| Pages too large to check fully | The page tree was capped, so results for that page may be incomplete. |
+
+Repairs are a separate step that the owner approves (Phase 5 of
+docs/server-logic-plan.md).
 
 ### Dates and times
 
@@ -134,6 +152,9 @@ npm run -s flow -- done <nodeId> --prod --yes
 # Move a node under another one on the same page, or to the top of another page
 npm run -s flow -- move <nodeId> --parent <newParentId> --prod --yes
 npm run -s flow -- move <nodeId> --page <otherPageId> --after top --prod --yes
+
+# Check the data for damage (read-only)
+npm run -s flow -- doctor --prod
 
 # Paste a block of notes
 cat notes.md | npm run -s flow -- add-outline <pageId> - --prod --yes

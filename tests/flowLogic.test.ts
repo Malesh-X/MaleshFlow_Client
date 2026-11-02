@@ -5,16 +5,21 @@ import {
   classifyStrayParent,
   collectDescendantIds,
   createPageArgs,
+  endNotAfterDue,
   findSectionNode,
   findStrayNodes,
   getPageMeta,
   isNodeCompleted,
   isNodeLocked,
   isPlannerCompletionItem,
+  isUntypedSectionPage,
   kindChangeArgs,
+  nodeChecks,
+  noteHasTaskStatus,
   pageTypeForSection,
   parseDueDate,
   primarySectionSlot,
+  recurringWithoutDue,
   scheduleForDue,
   validateParent,
   type PageDoc,
@@ -91,6 +96,15 @@ test("findSectionNode finds an active root section by slot", () => {
   const nested = node({ parentNodeId: section._id, sourceMeta: { sectionSlot: "noteArchive" } });
   assert.equal(findSectionNode([section, archived, nested], "noteMain"), section);
   assert.equal(findSectionNode([section, archived, nested], "noteArchive"), null);
+});
+
+test("isUntypedSectionPage flags default pages in typed sections only", () => {
+  assert.equal(isUntypedSectionPage(page({ sidebarSection: "Models", pageType: "default" })), true);
+  assert.equal(isUntypedSectionPage(page({ sidebarSection: "Journal" })), true);
+  assert.equal(isUntypedSectionPage(page({ sidebarSection: "Views", pageType: "multiPage" })), false);
+  assert.equal(isUntypedSectionPage(page({ sidebarSection: "Notes", pageType: "default" })), false);
+  assert.equal(isUntypedSectionPage(page({ sidebarSection: "Templates", pageType: "default" })), false);
+  assert.equal(isUntypedSectionPage(page({ sidebarSection: "Tasks", pageType: "default" })), false);
 });
 
 // ---- nodes ----
@@ -195,7 +209,7 @@ test("kindChangeArgs matches the app's task/note toggle and always locks", () =>
   assert.deepEqual(kindChangeArgs(node({ kind: "task" }), "task"), { kind: "task", lockKind: true });
 });
 
-// ---- stray items ----
+// ---- stray items and doctor checks ----
 
 test("findStrayNodes lists active nodes whose parent isn't active on the page", () => {
   const root = node();
@@ -216,4 +230,29 @@ test("classifyStrayParent explains why a parent can't be used", () => {
   assert.equal(classifyStrayParent("p1", { pageId: "p2", archived: false }), "otherPage");
   assert.equal(classifyStrayParent("p1", { pageId: "p1", archived: true }), "archived");
   assert.equal(classifyStrayParent("p1", { pageId: "p1", archived: false }), "notLoaded");
+});
+
+test("doctor node checks", () => {
+  const statusNote = node({ taskStatus: "todo" });
+  const task = node({ kind: "task", taskStatus: "todo", dueAt: 100, dueEndAt: 200 });
+  const recurringNoDue = node({ kind: "task", taskStatus: "todo", sourceMeta: { recurrenceFrequency: "daily" } });
+  const recurringWithDue = node({ kind: "task", taskStatus: "todo", dueAt: 100, sourceMeta: { recurrenceFrequency: "daily" } });
+  const endBeforeDue = node({ kind: "task", taskStatus: "todo", dueAt: 200, dueEndAt: 100 });
+  const endWithoutDue = node({ kind: "task", taskStatus: "todo", dueEndAt: 100 });
+  const archivedBad = node({ taskStatus: "todo", archived: true });
+
+  assert.equal(noteHasTaskStatus(statusNote), true);
+  assert.equal(noteHasTaskStatus(task), false);
+  assert.equal(noteHasTaskStatus(archivedBad), false);
+  assert.equal(recurringWithoutDue(recurringNoDue), true);
+  assert.equal(recurringWithoutDue(recurringWithDue), false);
+  assert.equal(endNotAfterDue(endBeforeDue), true);
+  assert.equal(endNotAfterDue(endWithoutDue), true);
+  assert.equal(endNotAfterDue(task), false);
+
+  const result = nodeChecks(page({}, "Inbox"), [statusNote, task, recurringNoDue, recurringWithDue, endBeforeDue, endWithoutDue, archivedBad]);
+  assert.deepEqual(result.notesWithTaskStatus.map((f) => f.nodeId), [statusNote._id]);
+  assert.deepEqual(result.recurringWithoutDue.map((f) => f.nodeId), [recurringNoDue._id]);
+  assert.deepEqual(result.endNotAfterDue.map((f) => f.nodeId), [endBeforeDue._id, endWithoutDue._id]);
+  assert.equal(result.notesWithTaskStatus[0].pageTitle, "Inbox");
 });
