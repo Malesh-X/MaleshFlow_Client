@@ -5,6 +5,7 @@ import {
   classifyStrayParent,
   collectDescendantIds,
   createPageArgs,
+  dueEndProblem,
   endNotAfterDue,
   findSectionNode,
   findStrayNodes,
@@ -23,6 +24,7 @@ import {
   primarySectionSlot,
   recurringWithoutDue,
   scheduleForDue,
+  timeZoneForTime,
   validateParent,
   type PageDoc,
   type TreeNode,
@@ -298,4 +300,21 @@ test("lastChildId picks the last child by position, archived ones included", () 
   node({ parentNodeId: parent._id, position: 20 });
   assert.equal(lastChildId([parent, last, first], parent._id), last._id);
   assert.equal(lastChildId([parent], parent._id), undefined);
+});
+
+test("dueEndProblem needs a due date and an end after it", () => {
+  const due = dateInputValueToTimestamp("2026-11-15")!;
+  const later = dateInputValueToTimestamp("2026-11-17")!;
+  assert.equal(dueEndProblem(later, due), null);
+  assert.equal(dueEndProblem(null, null), null);
+  assert.match(dueEndProblem(later, null)!, /needs a due date/);
+  assert.match(dueEndProblem(later, undefined)!, /needs a due date/);
+  assert.match(dueEndProblem(due, due)!, /after the due date/);
+  assert.match(dueEndProblem(due, later)!, /after the due date/);
+});
+
+test("timeZoneForTime keeps the item's zone and falls back on the machine's", () => {
+  assert.equal(timeZoneForTime("Europe/Lisbon", "Pacific/Honolulu"), "Europe/Lisbon");
+  assert.equal(timeZoneForTime(null, "Pacific/Honolulu"), "Pacific/Honolulu");
+  assert.equal(timeZoneForTime(undefined, "Pacific/Honolulu"), "Pacific/Honolulu");
 });

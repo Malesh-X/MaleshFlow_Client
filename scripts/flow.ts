@@ -4,12 +4,14 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ConvexHttpClient } from "convex/browser";
+import { ConvexError } from "convex/values";
 import { anyApi } from "convex/server";
 import {
   SIDEBAR_SECTIONS,
   classifyStrayParent,
   collectDescendantIds,
   createPageArgs,
+  dueEndProblem,
   findSectionNode,
   findStrayNodes,
   isNodeCompleted,
@@ -23,6 +25,7 @@ import {
   parseDueDate,
   primarySectionSlot,
   scheduleForDue,
+  timeZoneForTime,
   validateParent,
   type DoctorFinding,
   type PageDoc,
@@ -48,9 +51,10 @@ const COMMANDS: Record<string, Spec> = {
   "rename-page": { args: ["pageId", "title..."], usage: "rename-page <pageId> <title>           Rename a page" },
   add: {
     args: ["pageId", "text..."],
-    flags: ["parent", "after", "task", "due", "time"],
+    flags: ["parent", "after", "task", "due", "due-end", "time"],
     usage:
-      "add <pageId> <text> [--parent id] [--after id|top] [--task] [--due YYYY-MM-DD [--time HH:MM]]\n" +
+      "add <pageId> <text> [--parent id] [--after id|top] [--task]\n" +
+      "                    [--due YYYY-MM-DD [--due-end YYYY-MM-DD] [--time HH:MM]]\n" +
       "                                         Add a node (end of the page's main section by default)",
   },
   "add-outline": {
@@ -59,9 +63,9 @@ const COMMANDS: Record<string, Spec> = {
   },
   update: {
     args: ["nodeId"],
-    flags: ["text", "status", "due", "time", "priority", "recur", "task", "note", "mode"],
+    flags: ["text", "status", "due", "due-end", "time", "priority", "recur", "task", "note", "mode"],
     usage:
-      "update <nodeId> [--text t] [--status todo|done] [--due YYYY-MM-DD|none]\n" +
+      "update <nodeId> [--text t] [--status todo|done] [--due YYYY-MM-DD|none] [--due-end YYYY-MM-DD|none]\n" +
       "                [--time HH:MM|none] [--priority low|medium|high|none]\n" +
       "                [--recur daily|weekly|monthly|yearly|<n>d|<n>w|<n>m|<n>y|none] [--task|--note]",
   },
@@ -70,7 +74,12 @@ const COMMANDS: Record<string, Spec> = {
     flags: ["mode"],
     usage:
       "done <nodeId> [--mode dueDate|today]   Complete an item the way the app's checkbox does\n" +
-      "                                         (planner -> Past Weeks, task pages -> Done, recurring rolls forward)",
+      "                                         (planner -> Past Weeks, task pages -> Done, recurring rolls forward);\n" +
+      "                                         prints a receipt id for undo-done",
+  },
+  "undo-done": {
+    args: ["receiptId"],
+    usage: "undo-done <receiptId>                  Undo a done, checked: refused if the items changed since",
   },
   move: {
     args: ["nodeId"],
@@ -165,11 +174,12 @@ function parseDue(value: string | undefined) {
   }
 }
 
-function parseTime(value: string | undefined) {
+// `existingZone`: the item's time zone, kept when it has one.
+function parseTime(value: string | undefined, existingZone?: string | null) {
   if (value === undefined) return {};
   if (value === "none") return { dueTime: null, dueTimeZone: null };
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) fail(`Bad time "${value}"; use 24-hour HH:MM or none.`);
-  return { dueTime: value, dueTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+  return { dueTime: value, dueTimeZone: timeZoneForTime(existingZone, Intl.DateTimeFormat().resolvedOptions().timeZone) };
 }
 
 function parseRecur(value: string | undefined) {
@@ -283,6 +293,7 @@ async function workspaceSettings(): Promise<WorkspaceSettings> {
 type CompletionResult = {
   status: "applied" | "noop" | "stale";
   route: string;
+  receiptId?: string | null;
   before: { revision: number };
   after: { taskStatus: string | null; noteCompleted: boolean; dueAt: number | null } | null;
 };
@@ -317,7 +328,9 @@ async function completeLikeApp(nodeId: string) {
   if (result.status === "stale") fail("The item changed since it was read; nothing changed. Run done again.");
   if (result.status === "noop") return console.log("Already done; nothing changed.");
   console.error(`Completed: ${ROUTE_LABELS[result.route] ?? result.route} (mode ${completionMode}).`);
-  return ok();
+  if (!result.receiptId) return ok();
+  console.error(`Receipt (undo with: undo-done ${result.receiptId}):`);
+  return ok(result.receiptId);
 }
 
 // Where `add` puts a new item: --after's parent, --parent, or the page's main
@@ -496,6 +509,11 @@ async function main() {
       const [pageId, ...text] = rest;
       const dueAt = parseDue(str("due"));
       if (str("time") && dueAt == null) fail("--time needs --due.");
+      const dueEndAt = parseDue(str("due-end"));
+      if (dueEndAt !== undefined) {
+        const problem = dueEndProblem(dueEndAt, dueAt);
+        if (problem) fail(problem);
+      }
       const { page, nodes } = await loadTree(pageId);
       if (page.archived) fail("That page is archived.");
       // With no --parent/--after the server puts it at the end of the page's
@@ -521,6 +539,7 @@ async function main() {
         // tagging won't flip it back to a note.
         ...(isTask ? { kind: "task", taskStatus: "todo", lockKind: true } : {}),
         ...(dueAt != null ? { dueAt, ...parseTime(str("time")) } : {}),
+        ...(dueEndAt != null ? { dueEndAt } : {}),
       };
       const created = await mutation("workspace:createNodesBatch", { pageId, nodes: [entry], parseDraft: true });
       return ok(Array.isArray(created) ? (created[0] as { _id: string })._id : created);
@@ -544,7 +563,7 @@ async function main() {
     case "update": {
       const nodeId = rest[0];
       const status = oneOf("status", ["todo", "done"] as const);
-      const editFlags = ["text", "due", "time", "priority", "recur", "task", "note"].filter((name) => flags[name] !== undefined);
+      const editFlags = ["text", "due", "due-end", "time", "priority", "recur", "task", "note"].filter((name) => flags[name] !== undefined);
       if (str("mode") && status !== "done") fail("--mode only applies with --status done.");
       if (status === "done") {
         // Same path as `done`, so completion routing runs and a done item stays done.
@@ -555,13 +574,30 @@ async function main() {
       if (!status && !editFlags.length) fail(`Nothing to update.\nUsage: ${spec.usage}`);
       const priority = oneOf("priority", ["low", "medium", "high", "none"] as const);
       const dueAt = parseDue(str("due"));
-      const time = parseTime(str("time"));
+      const dueEndAt = parseDue(str("due-end"));
       const recur = parseRecur(str("recur"));
 
       const { node } = await loadActiveNode(nodeId);
       const nextKind = flags.task ? "task" : flags.note ? "note" : node.kind;
       if (status && nextKind !== "task") fail("--status is for tasks. Add --task to make it a task, or use done for planner items.");
       if ((flags.task || flags.note) && isNodeLocked(node)) fail("Section headers and planner days can't change kind.");
+      // Times and recurrence belong to tasks; "none" may still clear them.
+      const setsTime = str("time") !== undefined && str("time") !== "none";
+      const setsRecur = recur !== undefined && recur !== null;
+      if (nextKind !== "task" && (setsTime || setsRecur)) {
+        fail(`${setsTime ? "--time" : "--recur"} is for tasks; this is a note. Add --task to make it a task.`);
+      }
+      // A kind change to a task resets the schedule, so the item's old due
+      // date only counts when the kind stays.
+      const keptDueAt = flags.task && node.kind !== "task" ? null : (node.dueAt ?? null);
+      const effectiveDueAt = dueAt !== undefined ? dueAt : keptDueAt;
+      if (setsTime && effectiveDueAt === null) fail("--time needs a due date (pass --due, or set one first).");
+      if (dueEndAt !== undefined) {
+        const problem = dueEndProblem(dueEndAt, effectiveDueAt);
+        if (problem) fail(problem);
+      }
+      // --time keeps the item's time zone when it has one.
+      const time = parseTime(str("time"), node.dueTimeZone);
 
       const args: Record<string, unknown> = { nodeId };
       if (flags.task || flags.note) Object.assign(args, kindChangeArgs(node, nextKind as "task" | "note"));
@@ -569,6 +605,7 @@ async function main() {
       if (status) args.taskStatus = status;
       if (priority) args.priority = priority === "none" ? null : priority;
       if (dueAt !== undefined) Object.assign(args, scheduleForDue(dueAt, { dueEndAt: args.dueEndAt === null ? null : node.dueEndAt }));
+      if (dueEndAt !== undefined) args.dueEndAt = dueEndAt;
       Object.assign(args, time);
       if (recur !== undefined) args.recurrenceFrequency = recur;
       await mutation("workspace:updateNode", args);
@@ -576,6 +613,15 @@ async function main() {
     }
     case "done":
       return completeLikeApp(rest[0]);
+    case "undo-done": {
+      // workspace:undoCompletion checks the receipt first: if anything it
+      // touched changed since (an edit, a new child under a Done or Past
+      // Weeks copy), it refuses with what changed, and nothing is undone.
+      const results = (await mutation("workspace:undoCompletion", { receiptIds: [rest[0]] })) as unknown;
+      if (dryRun || !Array.isArray(results)) return ok();
+      console.error("Undone.");
+      return ok();
+    }
     case "move": {
       const nodeId = rest[0];
       const parentFlag = str("parent");
@@ -652,6 +698,14 @@ async function main() {
 
 main().catch((error) => {
   let message = error instanceof Error ? error.message : String(error);
+  // ConvexErrors carry a clean message in `data` (e.g. a refused undo).
+  if (error instanceof ConvexError) {
+    const data = error.data as unknown;
+    if (typeof data === "string") message = data;
+    else if (data && typeof data === "object" && typeof (data as { message?: unknown }).message === "string") {
+      message = (data as { message: string }).message;
+    }
+  }
   // Convex validation errors echo the call's arguments, including the key.
   if (connection?.key) message = message.split(connection.key).join("<ownerKey>");
   if (/Invalid owner access token/.test(message)) {

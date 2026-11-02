@@ -198,6 +198,22 @@ export function scheduleForDue(dueAt: number | null, existing: { dueEndAt?: numb
   return { dueAt, ...(endAt !== null && endAt <= dueAt ? { dueEndAt: null } : {}) };
 }
 
+// Checks an end date (--due-end) against the due date it will have. Returns
+// an error message, or null when it's fine (or being cleared).
+export function dueEndProblem(dueEndAt: number | null, dueAt: number | null | undefined) {
+  if (dueEndAt === null) return null;
+  if (dueAt === null || dueAt === undefined) return "--due-end needs a due date (pass --due, or set one first).";
+  if (dueEndAt <= dueAt) return "--due-end must be after the due date.";
+  return null;
+}
+
+// The time zone a --time value is stored with: the item's own zone when it
+// has one (so changing the time doesn't move it to the CLI machine's zone),
+// otherwise the machine's.
+export function timeZoneForTime(existing: string | null | undefined, machineZone: string) {
+  return existing || machineZone;
+}
+
 // ---- doctor checks (read-only) ----
 
 export type DoctorFinding = { pageId: string; pageTitle: string; nodeId?: string; text: string; detail?: string };

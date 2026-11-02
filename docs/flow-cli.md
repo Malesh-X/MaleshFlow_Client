@@ -59,16 +59,18 @@ Convex login. Never print, log or commit the key. The CLI replaces it with
 | `add <pageId> <text>` | Add a node at the end of the page's main section (Note, Template, Scratchpad, Thoughts/Stuff, Model, Included Pages/Nodes), or the page root on task and plain pages. Sends one `workspace:createNodesBatch` entry, so text, kind, dates, time, time zone and the kind lock land in a single write. Without `--parent`/`--after` the server picks that section (the default parent), so the dry run shows no parent. Planner pages need `--parent`. Prints the node id. |
 | &nbsp;&nbsp;`--parent <nodeId>` | Nest under a node on the same page (appends after its last child). |
 | &nbsp;&nbsp;`--after <nodeId>` / `--after top` | Place after a specific item (and under its parent), or first. |
-| &nbsp;&nbsp;`--task`, `--due YYYY-MM-DD`, `--time HH:MM` | Make it a task, with a due date and optional time (`--due` implies `--task`; `--time` needs `--due`). A task made this way has its kind locked, like the app's toggle, so AI tagging won't turn it into a note. |
+| &nbsp;&nbsp;`--task`, `--due YYYY-MM-DD`, `--due-end YYYY-MM-DD`, `--time HH:MM` | Make it a task, with a due date, an optional end date (after the due date) and an optional time (`--due` implies `--task`; `--due-end` and `--time` need `--due`). A task made this way has its kind locked, like the app's toggle, so AI tagging won't turn it into a note. |
 | `add-outline <pageId> <file\|->` | Append an outline in one batch (see below) to the same place `add` would, parsed exactly like the app's importer. `-` reads stdin. Prints the new node ids. |
 | `update <nodeId>` | Change a node with any of the flags below. |
 | &nbsp;&nbsp;`--text "…"` | Replace the text. |
 | &nbsp;&nbsp;`--status todo\|done` | Task status (tasks only). `done` runs `done` (below), so it can't be combined with other flags; `--mode` applies. `todo` reopens. |
-| &nbsp;&nbsp;`--due YYYY-MM-DD\|none`, `--time HH:MM\|none` | Schedule or unschedule. `none` clears due date, end date, time, time zone and recurrence. A new due date drops an end date that isn't after it. |
+| &nbsp;&nbsp;`--due YYYY-MM-DD\|none`, `--time HH:MM\|none` | Schedule or unschedule. `--due none` clears due date, end date, time, time zone and recurrence. A new due date drops an end date that isn't after it. `--time` needs a due date and keeps the item's time zone if it has one. |
+| &nbsp;&nbsp;`--due-end YYYY-MM-DD\|none` | End date for a range (e.g. a trip). Must be after the due date (the new one if `--due` is also given); `none` clears it. |
 | &nbsp;&nbsp;`--priority low\|medium\|high\|none` | Priority. |
-| &nbsp;&nbsp;`--recur daily\|weekly\|monthly\|yearly\|<n>d\|<n>w\|<n>m\|<n>y\|none` | Recurrence, e.g. `2w` = every 2 weeks. |
+| &nbsp;&nbsp;`--recur daily\|weekly\|monthly\|yearly\|<n>d\|<n>w\|<n>m\|<n>y\|none` | Recurrence, e.g. `2w` = every 2 weeks. `--time` and `--recur` are refused on notes (add `--task`); `none` still clears them. |
 | &nbsp;&nbsp;`--task` / `--note` | Change the node kind like the app's toggle: locks the kind (so AI tagging won't flip it back) and resets status, dates and recurrence. Not allowed on section headers or planner days. |
-| `done <nodeId> [--mode dueDate\|today]` | Complete an item exactly like the app's checkbox (see below). `--mode` sets how recurring tasks roll forward (default `dueDate`, the app's default). Never reopens: an item that is already done is left alone. |
+| `done <nodeId> [--mode dueDate\|today]` | Complete an item exactly like the app's checkbox (see below). `--mode` sets how recurring tasks roll forward (default `dueDate`, the app's default). Never reopens: an item that is already done is left alone. Prints a receipt id for `undo-done`. |
+| `undo-done <receiptId>` | Undo a `done`, the same checked undo as the app's Cmd+Z (see below). Refused, with what changed, if anything the completion touched changed since. |
 | `move <nodeId>` | Move a node and its whole branch; appends at the end of the destination by default. Section headers and planner days can't be moved. |
 | &nbsp;&nbsp;`--page <pageId>` | Another page: the whole branch moves with `workspace:moveNodeTree` (the app's "Move to page" and cut and paste use it too), with its links and sidebar favorites, landing at the end of the page's top level unless `--parent`/`--after` place it. |
 | &nbsp;&nbsp;`--parent <nodeId>\|root` | New parent, on the destination page. Refused if it's the item itself or inside it. |
@@ -95,12 +97,32 @@ toggle call, and it routes the item the same way:
 | Any other task | `taskStatus: "done"`. |
 | Note | Marked completed. |
 
-The CLI prints which path the server took. `update --status done` takes the
-same path. An item that is already done (or already archived by a completion)
+The CLI prints which path the server took (on stderr) and the completion's
+receipt id (on stdout). `update --status done` takes the same path. An item that is already done (or already archived by a completion)
 is left alone; neither command ever reopens a task. If the item changed between
 reading it and the write (another device completed it, say), nothing changes
 and the CLI says so; run `done` again. To reopen a plain task, use
 `update --status todo`.
+
+### Undoing a completion: `undo-done`
+
+`done` stores an undo receipt on the server (`undoReceipts` table, kept 30
+days) and prints its id. `undo-done <receiptId>` calls
+`workspace:undoCompletion`, the same checked undo the app's Cmd+Z uses. It
+puts everything back: deletes the Done or Past Weeks copy, unarchives the
+original, restores the item's status, dates and occurrence, and re-adds
+sidebar favorites. Before changing anything it checks that:
+
+- every item the completion touched is still at the revision the completion
+  left (any edit, by the app, the CLI or another device, changes it), and
+- no item was added to or moved out of a subtree undo would delete or
+  restore (for example a note added under the Done copy).
+
+If either fails, it prints what changed (e.g. `"Pay rent" was changed`)
+and nothing is undone. Undo several completions of the same item newest
+first: each undo rewrites the next receipt's expectations, so the chain
+passes as long as nothing else happened in between. An already-undone
+receipt is refused.
 
 ### `doctor` checks
 
@@ -125,8 +147,9 @@ docs/server-logic-plan.md).
 
 `--due 2026-11-15` is stored as **local noon** in the time zone of the machine
 running the CLI, the same as the app's date picker (`dateInputValueToTimestamp`).
-Run it on a machine set to your usual time zone. `--time` also records that
-machine's time zone (e.g. `Pacific/Honolulu`).
+Run it on a machine set to your usual time zone. `--time` keeps the item's
+time zone when it has one; otherwise it records the machine's (e.g.
+`Pacific/Honolulu`).
 
 ### Outline format for `add-outline`
 
@@ -173,7 +196,8 @@ npm run -s flow -- add <pageId> "Book flights" --due 2026-11-15 --time 09:00 --p
 # Edit, prioritize, make recurring, complete
 npm run -s flow -- update <nodeId> --text "Book flights to Lisbon" --priority high --prod --yes
 npm run -s flow -- update <nodeId> --recur weekly --prod --yes
-npm run -s flow -- done <nodeId> --prod --yes
+npm run -s flow -- done <nodeId> --prod --yes        # prints a receipt id
+npm run -s flow -- undo-done <receiptId> --prod --yes
 
 # Move a node under another one on the same page, or to the top of another page
 npm run -s flow -- move <nodeId> --parent <newParentId> --prod --yes
