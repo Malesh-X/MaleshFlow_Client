@@ -12,7 +12,8 @@
     "lint": "eslint . --ignore-pattern \"convex/_generated/**\"",
     "test": "tsx --test tests/**/*.test.ts tests/**/*.test.tsx",
     "typecheck": "tsc --noEmit && tsc --noEmit -p convex/tsconfig.json",
-    "typecheck:convex": "tsc --noEmit -p convex/tsconfig.json"
+    "typecheck:convex": "tsc --noEmit -p convex/tsconfig.json",
+    "flow": "NODE_NO_WARNINGS=1 tsx scripts/flow.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",
