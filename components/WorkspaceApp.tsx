@@ -12552,6 +12552,7 @@ function ConfiguredWorkspace({
       <NodeCopyLinkContext.Provider value={copyNodeLinkToClipboard}>
       <TagAutocompleteLoadingContext.Provider value={cachedTags === null}>
       <NodeScheduleActionContext.Provider value={nodeScheduleActionContextValue}>
+      <NodeCompletionContext.Provider value={completeNode}>
       <PageSectionCollapseContext.Provider value={pageSectionCollapseContextValue}>
       <main
         className="relative min-h-screen bg-[var(--workspace-bg)] text-[var(--workspace-text)]"
@@ -16016,6 +16017,7 @@ function ConfiguredWorkspace({
       ) : null}
       </main>
       </PageSectionCollapseContext.Provider>
+      </NodeCompletionContext.Provider>
       </NodeScheduleActionContext.Provider>
       </TagAutocompleteLoadingContext.Provider>
       </NodeCopyLinkContext.Provider>

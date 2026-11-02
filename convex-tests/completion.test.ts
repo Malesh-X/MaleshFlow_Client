@@ -266,3 +266,41 @@ describe("legacy adapters", () => {
     expect((await get(item)).taskStatus).toBe("done");
   });
 });
+
+// Prod regression after Phase 3: checking off items in older data.
+describe("older data", () => {
+  test("items with no revision field complete with expectedRevision 0 on every page kind", async () => {
+    const { t, get, page, add, planner } = await setup();
+    const notePage = await page("Notes", "Notes", "note");
+    const taskPage = await page("Tasks", "Tasks", "task");
+    const plan = await planner("Plan", day(2));
+    const items = [
+      await add(notePage, "Plain task", { kind: "task", taskStatus: "todo" }),
+      await add(notePage, "A note", { kind: "note" }),
+      await add(taskPage, "Task page task", { kind: "task", taskStatus: "todo" }),
+      await add(plan.pageId, "Planner task", { kind: "task", taskStatus: "todo", parentNodeId: plan.dayId }),
+    ];
+    for (const id of items) {
+      await t.run(async (ctx) => {
+        const { _id, _creationTime, revision: _revision, ...rest } = (await ctx.db.get(id))!;
+        await ctx.db.replace(id, rest);
+      });
+      expect((await get(id)).revision).toBeUndefined();
+      const result = await t.mutation(api.workspace.setNodeCompletion, {
+        ownerKey, nodeId: id, intent: "complete", completionMode: "dueDate", expectedRevision: 0,
+      });
+      expect(result.status).toBe("applied");
+    }
+  });
+
+  test("a workspace with no saved settings can complete items", async () => {
+    const t = convexTest(schema, modules);
+    const pageId = await t.mutation(api.workspace.createPage, { ownerKey, title: "P", sidebarSection: "Notes", pageType: "note" });
+    const task = await t.mutation(api.workspace.createNode, { ownerKey, pageId, text: "T", kind: "task", taskStatus: "todo" });
+    const result = await t.mutation(api.workspace.setNodeCompletion, {
+      ownerKey, nodeId: task, intent: "complete", completionMode: "today",
+      expectedRevision: (await t.run((ctx) => ctx.db.get(task)))!.revision ?? 0,
+    });
+    expect(result.status).toBe("applied");
+  });
+});
