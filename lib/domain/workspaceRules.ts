@@ -168,3 +168,28 @@ export function completionStateMatches(seen: CompletionSource, current: Completi
 export function completionIntentFor(node: { kind: string; taskStatus?: string | null; sourceMeta?: unknown }) {
   return isNodeCompleted(node) ? ("reopen" as const) : ("complete" as const);
 }
+
+// The section the app adds new items into when no parent is named: the
+// app's composer, createNode / createNodesBatch without a parent (Phase 3,
+// change 4) and the CLI's `add`. Planner pages have no default.
+export function primarySectionSlot(page: { sourceMeta?: unknown }): string | "root" | "requireParent" {
+  const { pageType, sidebarSection } = getPageMeta(page);
+  switch (pageType) {
+    case "planner":
+      return "requireParent";
+    case "note":
+      return "noteMain";
+    case "journal":
+      return "journalThoughts";
+    case "scratchpad":
+      return "scratchpadLive";
+    case "model":
+      return "model";
+    case "multiPage":
+      return "multiPageIncludedPages";
+    case "default":
+      return sidebarSection === "Templates" ? "templateMain" : "root";
+    default:
+      return "root";
+  }
+}

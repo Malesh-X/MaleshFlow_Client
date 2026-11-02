@@ -111,7 +111,7 @@ import {
 import { changeForUpdate } from "./lib/guardRules";
 import { isValidTimeZone } from "../lib/domain/timeZone";
 import { withNextSourceOccurrence } from "../lib/domain/planner";
-import { isNodeCompleted, isPlannerCompletionItem, isTaskPageWithDoneArchive } from "../lib/domain/workspaceRules";
+import { getNodeMeta, isNodeCompleted, isPlannerCompletionItem, isTaskPageWithDoneArchive, primarySectionSlot } from "../lib/domain/workspaceRules";
 import { readWorkspaceSettings, workspaceTimeZoneFor, writeWorkspaceSettings } from "./lib/workspaceSettings";
 
 function getTimestamp() {
@@ -5942,6 +5942,30 @@ export const renamePage = mutation({
   },
 });
 
+// Where a new item goes when the caller names no parent (Phase 3, change 4):
+// the page's primary section, the same one the app's composer adds into, or
+// the page's top level for page types without one. Planner pages have no
+// default: the caller must pick a day or section. A section the app hasn't
+// created yet falls back to the top level.
+async function defaultParentNodeId(ctx: MutationCtx, pageId: Id<"pages">) {
+  const page = await ctx.db.get(pageId);
+  if (!page) {
+    return null;
+  }
+  const slot = primarySectionSlot(page);
+  if (slot === "requireParent") {
+    throw new ConvexError("Planner pages need a parent: pick a day or the Focus section.");
+  }
+  if (slot === "root") {
+    return null;
+  }
+  const roots = await listSiblingNodes(ctx.db, pageId, null);
+  const section = roots
+    .filter((node) => !node.archived && getNodeMeta(node).sectionSlot === slot)
+    .sort((left, right) => left.position - right.position)[0];
+  return section?._id ?? null;
+}
+
 export const createNode = mutation({
   args: {
     ownerKey: v.string(),
@@ -5959,14 +5983,17 @@ export const createNode = mutation({
     const ctx = withGuards(rawCtx, "workspace:createNode");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
-    const parentNodeId = args.parentNodeId ?? null;
     await assertPageWritable(ctx, args.pageId);
+    // No parent named: the page's primary section (explicit null = top level).
+    const parentNodeId =
+      args.parentNodeId === undefined ? await defaultParentNodeId(ctx, args.pageId) : args.parentNodeId;
     await assertValidParent(ctx, { nodeId: null, parentNodeId, pageId: args.pageId });
+    // No position named: the end, like the app's composer.
     const position = await computeNodePosition(
       ctx.db,
       args.pageId,
       parentNodeId,
-      args.afterNodeId ?? null,
+      args.afterNodeId,
     );
     const text = args.text?.trim() || "";
     const kind = normalizeNodeKindForText(text, args.kind);
@@ -6020,19 +6047,29 @@ export const createNodesBatch = mutation({
     const siblingCache = createSiblingListCache();
 
     await assertPageWritable(ctx, args.pageId);
+    // Entries that name no parent at all go into the page's primary section.
+    let defaultParent: Id<"nodes"> | null | undefined;
     for (const entry of args.nodes) {
+      const parentDefaulted = entry.parentClientId === undefined && entry.parentNodeId === undefined;
+      if (parentDefaulted && defaultParent === undefined) {
+        defaultParent = await defaultParentNodeId(ctx, args.pageId);
+      }
       const parentNodeId =
         entry.parentClientId !== undefined
           ? (createdNodeIdsByClientId.get(entry.parentClientId) ?? null)
-          : (entry.parentNodeId ?? null);
+          : parentDefaulted
+            ? (defaultParent ?? null)
+            : (entry.parentNodeId ?? null);
       const afterNodeId =
         entry.afterClientId !== undefined
           ? (createdNodeIdsByClientId.get(entry.afterClientId) ?? null)
           : entry.afterNodeId !== undefined
           ? (entry.afterNodeId ?? null)
-          : lastParentNodeId === parentNodeId
+          : lastParentNodeId === parentNodeId && lastCreatedId !== null
             ? lastCreatedId
-            : null;
+            : parentDefaulted
+              ? undefined // the end of the section
+              : null;
       if (entry.parentClientId === undefined) {
         await assertValidParent(ctx, { nodeId: null, parentNodeId, pageId: args.pageId });
       }

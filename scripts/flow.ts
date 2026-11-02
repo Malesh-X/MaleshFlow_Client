@@ -264,13 +264,6 @@ async function loadActiveNode(nodeId: string) {
   return { node, page: tree.page, nodes: tree.nodes };
 }
 
-// Last active child under `parent`, so new items append instead of landing on top.
-function lastChildId(nodes: TreeNode[], parent: string | null, exclude?: string) {
-  const siblings = nodes.filter((n) => !n.archived && n.parentNodeId === parent && n._id !== exclude);
-  siblings.sort((a, b) => a.position - b.position);
-  return siblings.at(-1)?._id ?? null;
-}
-
 // Completes an item through workspace:setNodeCompletion, the same server path
 // as the app's checkbox: it routes planner items, task pages with a Done
 // archive, recurring tasks and notes. intent "complete" never reopens, and the
@@ -528,14 +521,18 @@ async function main() {
       if (str("time") && dueAt == null) fail("--time needs --due.");
       const { page, nodes } = await loadTree(pageId);
       if (page.archived) fail("That page is archived.");
-      const parent = resolveAddParent(page, nodes, str("parent"), str("after"));
-      const afterNodeId = str("after") === "top" ? null : (str("after") ?? lastChildId(nodes, parent));
+      // With no --parent/--after the server puts it at the end of the page's
+      // primary section (createNode's default parent).
+      const placed = str("parent") !== undefined || str("after") !== undefined;
+      if (!placed && primarySectionSlot(page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
+      const parent = placed ? resolveAddParent(page, nodes, str("parent"), str("after")) : undefined;
+      const after = str("after");
       const isTask = Boolean(flags.task) || dueAt != null;
       const nodeId = await mutation("workspace:createNode", {
         pageId,
         text: text.join(" "),
-        ...(parent ? { parentNodeId: parent } : {}),
-        afterNodeId,
+        ...(parent !== undefined ? { parentNodeId: parent } : {}),
+        ...(after !== undefined ? { afterNodeId: after === "top" ? null : after } : {}),
         ...(isTask ? { kind: "task", taskStatus: "todo" } : {}),
         ...(dueAt != null ? { dueAt } : {}),
       });
@@ -549,10 +546,9 @@ async function main() {
       if (!nodes.length) fail("No outline items found (lines must start with - or *).");
       const tree = await loadTree(pageId);
       if (tree.page.archived) fail("That page is archived.");
-      const parent = resolveAddParent(tree.page, tree.nodes, undefined, undefined);
-      const after = lastChildId(tree.nodes, parent);
-      for (const entry of nodes) if (!entry.parentClientId && parent) entry.parentNodeId = parent;
-      if (after) nodes[0].afterNodeId = after;
+      if (primarySectionSlot(tree.page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
+      // Top-level outline items name no parent, so the server adds them at the
+      // end of the page's primary section.
       return ok(await mutation("workspace:createNodesBatch", { pageId, nodes }));
     }
     case "update": {

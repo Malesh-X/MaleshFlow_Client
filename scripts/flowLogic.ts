@@ -2,7 +2,7 @@
 // Workspace rules (page types, locks, planner items, kind toggle) come from
 // lib/domain/workspaceRules.ts, the same module the app and server use.
 import { dateInputValueToTimestamp, timestampToDateInputValue } from "../lib/domain/recurrence";
-import { getNodeMeta, getPageMeta, pageTypeForSection, type PageType, type SidebarSection } from "../lib/domain/workspaceRules";
+import { getNodeMeta, pageTypeForSection, type PageType, type SidebarSection } from "../lib/domain/workspaceRules";
 
 export {
   SIDEBAR_SECTIONS,
@@ -13,6 +13,7 @@ export {
   isPlannerLinkedTaskCopy,
   kindChangeArgs,
   pageTypeForSection,
+  primarySectionSlot,
   type PageType,
   type SidebarSection,
 } from "../lib/domain/workspaceRules";
@@ -53,27 +54,6 @@ export function createPageArgs(title: string, section: SidebarSection, type?: "p
 
 // Where a new item goes when `add` has no --parent: the page's main section
 // (the one the app adds into), the page root, or nowhere (planner pages).
-export function primarySectionSlot(page: { sourceMeta?: unknown }): string | "root" | "requireParent" {
-  const { pageType, sidebarSection } = getPageMeta(page);
-  switch (pageType) {
-    case "planner":
-      return "requireParent";
-    case "note":
-      return "noteMain";
-    case "journal":
-      return "journalThoughts";
-    case "scratchpad":
-      return "scratchpadLive";
-    case "model":
-      return "model";
-    case "multiPage":
-      return "multiPageIncludedPages";
-    case "default":
-      return sidebarSection === "Templates" ? "templateMain" : "root";
-    default:
-      return "root";
-  }
-}
 
 export function findSectionNode(nodes: TreeNode[], slot: string) {
   return nodes.find((node) => !node.archived && node.parentNodeId === null && metaOf(node).sectionSlot === slot) ?? null;
