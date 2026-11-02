@@ -13,6 +13,7 @@ import {
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isOwnerKeyValid } from "./lib/auth";
+import { listDataDumpExclusions as collectDataDumpExclusions } from "../lib/domain/dataDump";
 import {
   assertOwnerKeyGuarded,
   isAuthLocked,
@@ -5412,6 +5413,44 @@ export const setNodeDataDumpExcluded = mutation({
     return {
       updatedCount,
       excluded: args.excluded,
+    };
+  },
+});
+
+// Every page and item excluded from data dumps (the "Show Data Dump
+// Exclusions" action). Reads every node, like the data dump export, so the app
+// only subscribes while that panel is open.
+export const listDataDumpExclusions = query({
+  args: {
+    ownerKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const pages = (await ctx.db.query("pages").collect()).filter(
+      (page) => !isPagePendingDeletion(page),
+    );
+    const pageIds = new Set(pages.map((page) => page._id as string));
+    const nodes = (await ctx.db.query("nodes").collect()).filter((node) =>
+      pageIds.has(node.pageId as string),
+    );
+    const nodeById = new Map(nodes.map((node) => [node._id as string, node]));
+    const exclusions = collectDataDumpExclusions(pages, nodes);
+    const byTitle = (left: Doc<"pages">, right: Doc<"pages">) =>
+      left.title.localeCompare(right.title);
+
+    return {
+      pages: exclusions.pages.sort(byTitle),
+      // Stable sort: outline order within each page is kept.
+      items: exclusions.items
+        .sort((left, right) => byTitle(left.page, right.page))
+        .map((item) => ({
+          node: item.node,
+          page: item.page,
+          parentNode: item.node.parentNodeId
+            ? (nodeById.get(item.node.parentNodeId as string) ?? null)
+            : null,
+          alsoCoveredBy: item.alsoCoveredBy,
+        })),
     };
   },
 });

@@ -7,6 +7,8 @@ import {
   createPageArgs,
   dueEndProblem,
   endNotAfterDue,
+  excludedReferenceProblem,
+  getDataDumpVisibility,
   findSectionNode,
   findStrayNodes,
   getPageMeta,
@@ -317,4 +319,24 @@ test("timeZoneForTime keeps the item's zone and falls back on the machine's", ()
   assert.equal(timeZoneForTime("Europe/Lisbon", "Pacific/Honolulu"), "Europe/Lisbon");
   assert.equal(timeZoneForTime(null, "Pacific/Honolulu"), "Pacific/Honolulu");
   assert.equal(timeZoneForTime(undefined, "Pacific/Honolulu"), "Pacific/Honolulu");
+});
+
+test("CLI hides what the data dump hides, including inherited exclusion", () => {
+  const parent = node({ text: "Private", sourceMeta: { excludeFromDataDump: true } });
+  const child = node({ parentNodeId: parent._id, text: "Child" });
+  const grandchild = node({ parentNodeId: child._id, text: "Grandchild" });
+  const kept = node({ text: "Public" });
+  const openPage: PageDoc = { _id: "p1", title: "Page" };
+  const visibility = getDataDumpVisibility(openPage, [parent, child, grandchild, kept]);
+  assert.deepEqual(visibility.visibleNodes.map((n) => n._id), [kept._id]);
+  assert.ok(visibility.excludedNodeIds.has(grandchild._id));
+  // Writes that point into the hidden subtree are refused.
+  assert.match(excludedReferenceProblem("parent", grandchild._id, visibility.excludedNodeIds) ?? "", /^--parent: .*excluded from data dumps/);
+  assert.equal(excludedReferenceProblem("after", kept._id, visibility.excludedNodeIds), null);
+  assert.equal(excludedReferenceProblem("parent", undefined, visibility.excludedNodeIds), null);
+
+  const page: PageDoc = { _id: "p2", title: "Hidden", sourceMeta: { excludeFromDataDump: true } };
+  const onHiddenPage = getDataDumpVisibility(page, [node({ pageId: "p2" })]);
+  assert.equal(onHiddenPage.pageExcluded, true);
+  assert.equal(onHiddenPage.visibleNodes.length, 0);
 });

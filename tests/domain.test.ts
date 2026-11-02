@@ -131,7 +131,9 @@ import {
   buildDataDumpManifest,
   buildUniqueDataDumpPath,
   filterDataDumpNodes,
+  getDataDumpVisibility,
   isDataDumpExcluded,
+  listDataDumpExclusions,
   sanitizeDataDumpPathSegment,
 } from "../lib/domain/dataDump";
 import { chatPlanSchema } from "../lib/domain/chat";
@@ -561,6 +563,60 @@ test("filterDataDumpNodes counts topmost excluded roots only", () => {
   assert.equal(result.excludedNodeCount, 3);
   assert.equal(result.excludedNodeSubtreeCount, 1);
   assert.deepEqual([...result.excludedRootIds], ["root"]);
+});
+
+test("getDataDumpVisibility hides excluded items with their subtrees", () => {
+  const nodes = [
+    { _id: "kept", parentNodeId: null },
+    { _id: "secret", parentNodeId: null, sourceMeta: { excludeFromDataDump: true } },
+    { _id: "secret-child", parentNodeId: "secret" },
+    { _id: "secret-grandchild", parentNodeId: "secret-child" },
+  ];
+  const visibility = getDataDumpVisibility({ sourceMeta: {} }, nodes);
+  assert.equal(visibility.pageExcluded, false);
+  assert.deepEqual(visibility.visibleNodes.map((node) => node._id), ["kept"]);
+  // A node is hidden when only its ancestor is flagged.
+  assert.deepEqual(
+    [...visibility.excludedNodeIds].sort(),
+    ["secret", "secret-child", "secret-grandchild"],
+  );
+});
+
+test("getDataDumpVisibility hides every node on an excluded page", () => {
+  const visibility = getDataDumpVisibility(
+    { sourceMeta: { excludeFromDataDump: true } },
+    [
+      { _id: "a", parentNodeId: null },
+      { _id: "b", parentNodeId: "a" },
+    ],
+  );
+  assert.equal(visibility.pageExcluded, true);
+  assert.deepEqual(visibility.visibleNodes, []);
+  assert.deepEqual([...visibility.excludedNodeIds].sort(), ["a", "b"]);
+});
+
+test("listDataDumpExclusions lists flagged pages and items, noting inherited ones", () => {
+  const pages = [
+    { _id: "p1", title: "Open" },
+    { _id: "p2", title: "Hidden", sourceMeta: { excludeFromDataDump: true } },
+  ];
+  const nodes = [
+    { _id: "plain", pageId: "p1", parentNodeId: null },
+    { _id: "root", pageId: "p1", parentNodeId: null, sourceMeta: { excludeFromDataDump: true } },
+    { _id: "nested", pageId: "p1", parentNodeId: "root", sourceMeta: { excludeFromDataDump: true } },
+    { _id: "onHiddenPage", pageId: "p2", parentNodeId: null, sourceMeta: { excludeFromDataDump: true } },
+    { _id: "orphan", pageId: "missing", parentNodeId: null, sourceMeta: { excludeFromDataDump: true } },
+  ];
+  const result = listDataDumpExclusions(pages, nodes);
+  assert.deepEqual(result.pages.map((page) => page._id), ["p2"]);
+  assert.deepEqual(
+    result.items.map((item) => [item.node._id, item.page._id, item.alsoCoveredBy]),
+    [
+      ["root", "p1", null],
+      ["nested", "p1", "ancestor"],
+      ["onHiddenPage", "p2", "page"],
+    ],
+  );
 });
 
 test("data dump paths are safe and unique", () => {

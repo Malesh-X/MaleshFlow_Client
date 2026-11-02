@@ -40,6 +40,27 @@ export type PageDoc = { _id: string; title: string; archived?: boolean; sourceMe
 
 export const metaOf = getNodeMeta;
 
+// ---- data dump exclusion ----
+
+// The CLI hides what the app's data dump export leaves out, using the same
+// rules (lib/domain/dataDump.ts): an excluded page and everything on it, and
+// each excluded item with its whole subtree.
+export { getDataDumpVisibility, isDataDumpExcluded } from "../lib/domain/dataDump";
+
+export const EXCLUDED_PAGE_MESSAGE =
+  "That page is excluded from data dumps, so the CLI won't read or change it. " +
+  'To include it again, use "Show Data Dump Exclusions" in the app\'s Actions.';
+export const EXCLUDED_ITEM_MESSAGE =
+  "That item is excluded from data dumps (it, a parent or its page is), so the CLI won't read or change it. " +
+  'To include it again, use "Show Data Dump Exclusions" in the app\'s Actions.';
+
+// Message for a --parent/--after id that points into an excluded subtree, or
+// null when it doesn't.
+export function excludedReferenceProblem(flag: string, id: string | null | undefined, excludedNodeIds: Set<string>) {
+  if (!id || !excludedNodeIds.has(id)) return null;
+  return `--${flag}: ${EXCLUDED_ITEM_MESSAGE}`;
+}
+
 // ---- pages ----
 
 // Arguments for workspace:createPage, matching what the app sends.

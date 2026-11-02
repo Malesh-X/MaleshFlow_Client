@@ -48,12 +48,48 @@ otherwise runs `npx convex env get OWNER_ACCESS_TOKEN [--prod]` using your
 Convex login. Never print, log or commit the key. The CLI replaces it with
 `<ownerKey>` in error messages.
 
+## Data dump exclusions
+
+Pages and items excluded from data dumps (the app's "Exclude Page From Data
+Dump" and "Exclude Item From Data Dump" actions) are off limits to the CLI
+too. It uses the same rules as the export (`getDataDumpVisibility` in
+`lib/domain/dataDump.ts`):
+
+- An excluded page is left out of `pages` and `doctor`. `tree`, `add`,
+  `add-outline`, `rename-page` and `move --page` refuse it.
+- An excluded item is hidden with its whole subtree, so a child or grandchild
+  of an excluded item is hidden too, and so is everything on an excluded page.
+  `tree` leaves these items out (it notes how many on stderr), and `doctor`
+  skips them. Commands that target one (`update`, `done`, `move`, `archive`,
+  `unarchive`, or `--parent`/`--after` pointing into one) are refused with a
+  message saying it's excluded.
+- `doctor` doesn't name an excluded page when it explains a stray item, and it
+  drops guard-violation rows about excluded pages or items. The per-mutation
+  counts stay, since they hold no content.
+
+To see or undo exclusions, use "Show Data Dump Exclusions" in the app's
+Actions. It lists every excluded page and item with its page, and you can jump
+to one or include it again.
+
+What this does **not** cover:
+
+- `run query|mutation` sends the owner key straight to the server, which
+  doesn't know about this rule, so it can still read or change anything
+  (for example `run query workspace:getPageTree`). Don't use `run` to work
+  around an exclusion.
+- `undo-done` acts on a receipt and isn't checked. Receipts only come from
+  `done`, which already refuses excluded items.
+- The CLI has no search command. Searching through `run` isn't filtered.
+
+This is a rule the CLI keeps by convention; it isn't access control. Anyone
+with the owner key can read everything.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `pages` | List active pages as `<pageId>  <title>`. Journal pages are titled `YYYY-MM-DD`. |
-| `tree <pageId>` | Print the page outline with node ids. Tasks show `[ ]` / `[x]`. Archived nodes are hidden. Stray items (active, but their parent is archived, missing or on another page) are listed at the end. |
+| `pages` | List active pages as `<pageId>  <title>`. Journal pages are titled `YYYY-MM-DD`. Pages excluded from data dumps aren't listed. |
+| `tree <pageId>` | Print the page outline with node ids. Tasks show `[ ]` / `[x]`. Archived nodes are hidden. Stray items (active, but their parent is archived, missing or on another page) are listed at the end. Items excluded from data dumps (with their subtrees) are left out; an excluded page is refused. |
 | `add-page <title> [--section Tasks] [--type planner]` | Create a page the way the app's sidebar `+` does: the section sets the page type (Models → model, Tasks → task, Notes → note, Views → view, Journal → journal, Scratchpads → scratchpad, Templates → plain) and the server adds that type's sections. Journal pages are also added to the Latest Journal view. `--type planner` makes a planner (Tasks section only). Default section: Tasks. The server applies the same section-to-type rule when a caller (e.g. `run mutation workspace:createPage`) sends no type. Prints the page id. |
 | `rename-page <pageId> <title>` | Rename a page. |
 | `add <pageId> <text>` | Add a node at the end of the page's main section (Note, Template, Scratchpad, Thoughts/Stuff, Model, Included Pages/Nodes), or the page root on task and plain pages. Sends one `workspace:createNodesBatch` entry, so text, kind, dates, time, time zone and the kind lock land in a single write. Without `--parent`/`--after` the server picks that section (the default parent), so the dry run shows no parent. Planner pages need `--parent`. Prints the node id. |
@@ -129,7 +165,8 @@ receipt is refused.
 
 `doctor` only reads (`listPages`, `getPageTree`, `resolveNodeLinks`,
 `guardViolations:list`) and never
-writes, so it needs no `--yes`. It reports:
+writes, so it needs no `--yes`. It skips pages and items excluded from data
+dumps (see above). It reports:
 
 | Check | Means |
 | --- | --- |
@@ -229,5 +266,5 @@ npm run -s flow -- run query workspace:listTasks '{}' --prod
 
 - Node text supports the app's inline syntax (page links, tags); links are synced on write.
 - `run mutation` calls a Convex function directly and skips every check above
-  (locks, loops, page types). Prefer the dedicated commands.
+  (locks, loops, page types, data dump exclusions). Prefer the dedicated commands.
 - Deleting pages for good (`deletePageForever`) is irreversible. Archive instead unless the owner asks.

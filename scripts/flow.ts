@@ -7,13 +7,18 @@ import { ConvexHttpClient } from "convex/browser";
 import { ConvexError } from "convex/values";
 import { anyApi } from "convex/server";
 import {
+  EXCLUDED_ITEM_MESSAGE,
+  EXCLUDED_PAGE_MESSAGE,
   SIDEBAR_SECTIONS,
   classifyStrayParent,
   collectDescendantIds,
   createPageArgs,
   dueEndProblem,
+  excludedReferenceProblem,
   findSectionNode,
   findStrayNodes,
+  getDataDumpVisibility,
+  isDataDumpExcluded,
   isNodeCompleted,
   isNodeLocked,
   isUntypedSectionPage,
@@ -254,11 +259,45 @@ const ok = (value?: unknown) => (dryRun ? console.log("(dry run: nothing was sen
 
 // ---- reads ----
 type PageTree = { page: PageDoc; nodes: TreeNode[]; loadWarning?: string | null };
+// A page tree with data-dump-excluded items (and their subtrees) removed.
+// `excludedNodeIds` lets writes refuse ids that point into a hidden subtree.
+type VisibleTree = PageTree & { excludedNodeIds: Set<string> };
 type NodeInfo = { nodeId: string; pageId: string | null; archived: boolean; pageArchived: boolean; parentNodeId: string | null; parentArchived: boolean };
 
-async function loadTree(pageId: string) {
+function visibleTree(result: PageTree): VisibleTree | null {
+  const visibility = getDataDumpVisibility(result.page, result.nodes);
+  if (visibility.pageExcluded) return null;
+  return { ...result, nodes: visibility.visibleNodes, excludedNodeIds: visibility.excludedNodeIds };
+}
+
+// Every command reads pages through here, so excluded pages and items never
+// reach the output or a write.
+async function loadTree(pageId: string): Promise<VisibleTree> {
   const result = (await query("workspace:getPageTree", { pageId })) as PageTree | null;
-  return result ?? fail("Page not found.");
+  if (!result) fail("Page not found.");
+  return visibleTree(result) ?? fail(EXCLUDED_PAGE_MESSAGE);
+}
+
+// Refuses a node that is excluded from data dumps (or on an excluded page).
+// Returns its page tree.
+async function loadVisibleNodePage(nodeId: string, info: NodeInfo | undefined) {
+  if (!info?.pageId) fail("Node not found.");
+  const tree = await loadTree(info.pageId);
+  if (tree.excludedNodeIds.has(nodeId)) fail(EXCLUDED_ITEM_MESSAGE);
+  return tree;
+}
+
+// With no --parent the server adds to the page's main section; refuse when
+// that section is hidden (it's excluded, so it isn't in the visible tree).
+function refuseExcludedDefaultSection(tree: VisibleTree) {
+  const slot = primarySectionSlot(tree.page);
+  if (slot === "root" || slot === "requireParent" || !tree.excludedNodeIds.size) return;
+  if (!findSectionNode(tree.nodes, slot)) fail(`This page's "${slot}" section is missing or excluded from data dumps; pass --parent.`);
+}
+
+function refuseExcludedReference(flag: string, id: string | null | undefined, tree: VisibleTree) {
+  const problem = excludedReferenceProblem(flag, id, tree.excludedNodeIds);
+  if (problem) fail(problem);
 }
 
 async function resolveNodes(nodeIds: string[]) {
@@ -269,12 +308,11 @@ async function resolveNodes(nodeIds: string[]) {
 // An active node with its page and that page's active tree.
 async function loadActiveNode(nodeId: string) {
   const info = (await resolveNodes([nodeId])).get(nodeId);
-  if (!info?.pageId) fail("Node not found.");
-  if (info.archived) fail("That item is archived. Unarchive it first.");
-  if (info.pageArchived) fail("That item is on an archived page, which the app doesn't edit.");
-  const tree = await loadTree(info.pageId);
+  const tree = await loadVisibleNodePage(nodeId, info);
+  if (info!.archived) fail("That item is archived. Unarchive it first.");
+  if (info!.pageArchived) fail("That item is on an archived page, which the app doesn't edit.");
   const node = tree.nodes.find((n) => n._id === nodeId) ?? fail("Node not found in its page tree (the page may be too large to load).");
-  return { node, page: tree.page, nodes: tree.nodes };
+  return { node, page: tree.page, nodes: tree.nodes, tree };
 }
 
 // Completes an item through workspace:setNodeCompletion, the same server path
@@ -313,6 +351,7 @@ async function completeLikeApp(nodeId: string) {
   // --mode overrides the workspace setting; the app's default is dueDate.
   const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? settings.completionMode ?? "dueDate";
   const info = (await resolveNodes([nodeId])).get(nodeId);
+  if (info?.archived) await loadVisibleNodePage(nodeId, info);
   if (info?.archived) {
     // Completed planner and task-page items are archived (Past Weeks / Done).
     return console.log("That item is archived (completed planner and task-page items are); nothing changed.");
@@ -336,7 +375,10 @@ async function completeLikeApp(nodeId: string) {
 
 // Where `add` puts a new item: --after's parent, --parent, or the page's main
 // section (planner pages have none, so they need --parent).
-function resolveAddParent(page: PageDoc, nodes: TreeNode[], parentFlag: string | undefined, afterFlag: string | undefined) {
+function resolveAddParent(tree: VisibleTree, parentFlag: string | undefined, afterFlag: string | undefined) {
+  const { page, nodes } = tree;
+  refuseExcludedReference("parent", parentFlag, tree);
+  refuseExcludedReference("after", afterFlag, tree);
   let parent = parentFlag ?? null;
   if (afterFlag && afterFlag !== "top") {
     const after = nodes.find((n) => n._id === afterFlag) ?? fail("--after must be an active item on this page.");
@@ -392,7 +434,11 @@ async function doctor() {
   const limitValue = str("limit") ?? "5";
   if (!/^\d+$/.test(limitValue)) fail("--limit must be a whole number.");
   const limit = Number(limitValue);
-  const pages = (await query("workspace:listPages")) as PageDoc[];
+  // Pages and items excluded from data dumps are skipped, the same as the export.
+  const allPages = (await query("workspace:listPages")) as PageDoc[];
+  const pages = allPages.filter((page) => !isDataDumpExcluded(page));
+  const excludedPageIds = new Set(allPages.filter((page) => isDataDumpExcluded(page)).map((page) => page._id));
+  const excludedNodeIds = new Set<string>();
   const report = {
     pagesChecked: pages.length,
     strayItems: [] as DoctorFinding[],
@@ -407,9 +453,11 @@ async function doctor() {
   const strays: { page: PageDoc; node: TreeNode }[] = [];
   let done = 0;
   await mapLimit(pages, 6, async (page) => {
-    const tree = (await query("workspace:getPageTree", { pageId: page._id })) as PageTree | null;
+    const rawTree = (await query("workspace:getPageTree", { pageId: page._id })) as PageTree | null;
     if (++done % 25 === 0) console.error(`checked ${done}/${pages.length} pages...`);
+    const tree = rawTree ? visibleTree(rawTree) : null;
     if (!tree) return;
+    for (const id of tree.excludedNodeIds) excludedNodeIds.add(id);
     // Only node-loading warnings matter here; partial backlink counts don't.
     if (tree.loadWarning && /too large to load|could not be loaded/.test(tree.loadWarning)) report.partiallyLoadedPages.push({ pageId: page._id, pageTitle: page.title, text: page.title, detail: tree.loadWarning });
     const checks = nodeChecks(page, tree.nodes);
@@ -429,7 +477,9 @@ async function doctor() {
     const parent = parents.get(node.parentNodeId!) ?? null;
     const why = classifyStrayParent(page._id, parent);
     if (why === "notLoaded") continue;
-    const where = why === "otherPage" ? ` (on "${titles.get(parent!.pageId!) ?? parent!.pageId}")` : "";
+    // Don't name an excluded page.
+    const parentHidden = why === "otherPage" && excludedPageIds.has(parent!.pageId!);
+    const where = why === "otherPage" ? (parentHidden ? " (on a page excluded from data dumps)" : ` (on "${titles.get(parent!.pageId!) ?? parent!.pageId}")`) : "";
     report.strayItems.push({ pageId: page._id, pageTitle: page.title, nodeId: node._id, text: node.text, detail: `parent ${node.parentNodeId} ${why}${where}` });
   }
 
@@ -442,7 +492,14 @@ async function doctor() {
     // Deployments without Phase 2 don't have this query yet.
   }
 
-  if (flags.json) return print({ ...report, guardViolations: guards });
+  // Rows about excluded pages or items are dropped; the counts stay (they hold no content).
+  if (guards) {
+    guards = {
+      ...guards,
+      recent: guards.recent.filter((row) => !(row.pageId && excludedPageIds.has(row.pageId)) && !(row.nodeId && excludedNodeIds.has(row.nodeId))),
+    };
+  }
+  if (flags.json) return print({ ...report, excludedPagesSkipped: excludedPageIds.size, guardViolations: guards });
   const sections: [string, DoctorFinding[]][] = [
     ["Stray items (active, parent archived, missing or on another page)", report.strayItems],
     ["Pages under Models/Journal/Views/Scratchpads still typed default", report.untypedPages],
@@ -451,7 +508,8 @@ async function doctor() {
     ["End date not after the due date", report.endNotAfterDue],
     ["Pages too large to check fully (results above may be incomplete)", report.partiallyLoadedPages],
   ];
-  console.log(`Checked ${report.pagesChecked} active pages on ${prod ? "production" : "dev"}. Read-only: nothing was changed.\n`);
+  const skipped = excludedPageIds.size ? ` (skipped ${excludedPageIds.size} excluded from data dumps)` : "";
+  console.log(`Checked ${report.pagesChecked} active pages on ${prod ? "production" : "dev"}${skipped}. Read-only: nothing was changed.\n`);
   for (const [title, findings] of sections) {
     console.log(`${title}: ${findings.length}`);
     for (const f of findings.slice(0, limit)) {
@@ -470,14 +528,15 @@ async function doctor() {
 async function main() {
   switch (command) {
     case "pages": {
-      const pages = (await query("workspace:listPages")) as { _id: string; title: string }[];
+      const pages = ((await query("workspace:listPages")) as PageDoc[]).filter((page) => !isDataDumpExcluded(page));
       if (flags.json) return print(pages);
       if (!pages.length) console.error(prod ? "No pages." : "No pages on dev (the dev deployment is often empty; real data is on --prod).");
       for (const page of pages) console.log(`${page._id}  ${page.title}`);
       return;
     }
     case "tree": {
-      const result = await loadTree(rest[0]);
+      const { excludedNodeIds, ...result } = await loadTree(rest[0]);
+      if (excludedNodeIds.size) console.error(`${excludedNodeIds.size} item${excludedNodeIds.size === 1 ? "" : "s"} excluded from data dumps not shown.`);
       if (flags.json) return print(result);
       if (result.loadWarning) console.error(result.loadWarning);
       console.log(`# ${result.page.title}`);
@@ -504,6 +563,7 @@ async function main() {
       return ok(await mutation("workspace:createPage", createPageArgs(rest.join(" "), section, type)));
     }
     case "rename-page":
+      await loadTree(rest[0]);
       await mutation("workspace:renamePage", { pageId: rest[0], title: rest.slice(1).join(" ") });
       return ok();
     case "add": {
@@ -515,13 +575,15 @@ async function main() {
         const problem = dueEndProblem(dueEndAt, dueAt);
         if (problem) fail(problem);
       }
-      const { page, nodes } = await loadTree(pageId);
+      const tree = await loadTree(pageId);
+      const { page, nodes } = tree;
       if (page.archived) fail("That page is archived.");
       // With no --parent/--after the server puts it at the end of the page's
       // primary section (createNode's default parent).
       const placed = str("parent") !== undefined || str("after") !== undefined;
       if (!placed && primarySectionSlot(page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
-      const parent = placed ? resolveAddParent(page, nodes, str("parent"), str("after")) : undefined;
+      if (!placed) refuseExcludedDefaultSection(tree);
+      const parent = placed ? resolveAddParent(tree, str("parent"), str("after")) : undefined;
       const afterFlag = str("after");
       // --parent alone appends after the parent's last child (a batch entry
       // with a parent and no position would go first).
@@ -553,6 +615,7 @@ async function main() {
       const tree = await loadTree(pageId);
       if (tree.page.archived) fail("That page is archived.");
       if (primarySectionSlot(tree.page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
+      refuseExcludedDefaultSection(tree);
       // Top-level outline items name no parent, so the server adds them at the
       // end of the page's primary section. Like the app's importer, the
       // entries are already parsed, so no parseDraft.
@@ -633,7 +696,7 @@ async function main() {
       const parentFlag = str("parent");
       const afterFlag = str("after");
       if (!str("page") && parentFlag === undefined && afterFlag === undefined) fail(`Say where to move it.\nUsage: ${spec.usage}`);
-      const { node, nodes } = await loadActiveNode(nodeId);
+      const { node, nodes, tree: sourceTree } = await loadActiveNode(nodeId);
       if (isNodeLocked(node)) fail("Section headers and planner days can't be moved.");
       const targetPageId = str("page") ?? node.pageId;
       const crossPage = targetPageId !== node.pageId;
@@ -642,6 +705,9 @@ async function main() {
       const target = crossPage ? await loadTree(targetPageId) : null;
       if (target?.page.archived) fail("The destination page is archived.");
       const targetNodes = target?.nodes ?? nodes;
+      const targetTree = target ?? sourceTree;
+      if (parentFlag !== "root") refuseExcludedReference("parent", parentFlag, targetTree);
+      if (afterFlag !== "top") refuseExcludedReference("after", afterFlag, targetTree);
 
       let parent: string | null | undefined = parentFlag === undefined ? undefined : parentFlag === "root" ? null : parentFlag;
       let afterNodeId: string | null | undefined;
@@ -670,6 +736,7 @@ async function main() {
     }
     case "archive": {
       const info = (await resolveNodes([rest[0]])).get(rest[0]) ?? fail("Node not found.");
+      await loadVisibleNodePage(rest[0], info);
       if (info.archived) return console.log("Already archived; nothing changed.");
       const { node } = await loadActiveNode(rest[0]);
       if (isNodeLocked(node)) fail("Section headers and planner days can't be archived (the app would recreate them).");
@@ -678,6 +745,7 @@ async function main() {
     }
     case "unarchive": {
       const info = (await resolveNodes([rest[0]])).get(rest[0]) ?? fail("Node not found.");
+      await loadVisibleNodePage(rest[0], info);
       if (!info.archived) return console.log("Not archived; nothing changed.");
       if (info.pageArchived) fail("That item is on an archived page. Restore the page instead.");
       if (info.parentArchived) fail("Its parent is archived too. Unarchive the parent instead; that restores the whole branch.");

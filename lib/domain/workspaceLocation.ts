@@ -12,6 +12,7 @@ export type WorkspacePaletteMode =
   | "legacyViewer"
   | "overdueTasks"
   | "waitingTasks"
+  | "dataDumpExclusions"
   | "taskSchedule"
   | "noteDate";
 
@@ -40,6 +41,7 @@ const PALETTE_PANEL_SLUG_BY_MODE: Record<WorkspacePaletteMode, string> = {
   legacyViewer: "legacy-viewer",
   overdueTasks: "past-due",
   waitingTasks: "waiting",
+  dataDumpExclusions: "data-dump-exclusions",
   taskSchedule: "task-schedule",
   noteDate: "note-date",
 };

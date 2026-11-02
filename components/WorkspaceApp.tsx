@@ -409,6 +409,23 @@ type NodeSearchResult = {
   content?: string;
   resultKey?: string;
 };
+type DataDumpExclusionsResult = {
+  pages: PageDoc[];
+  items: Array<{
+    node: Doc<"nodes">;
+    page: PageDoc;
+    parentNode: Doc<"nodes"> | null;
+    alsoCoveredBy: "page" | "ancestor" | null;
+  }>;
+};
+type DataDumpExclusionRow =
+  | { kind: "page"; key: string; page: PageDoc }
+  | {
+      kind: "item";
+      key: string;
+      result: NodeSearchResult;
+      alsoCoveredBy: "page" | "ancestor" | null;
+    };
 type ActionPaletteResult = {
   key: string;
   title: string;
@@ -2106,6 +2123,8 @@ function getPaletteDocumentTitle(mode: PaletteMode): string {
       return "Past Due Tasks";
     case "waitingTasks":
       return "Waiting Tasks";
+    case "dataDumpExclusions":
+      return "Data Dump Exclusions";
     case "taskSchedule":
       return "Task Schedule";
     case "noteDate":
@@ -4348,6 +4367,12 @@ function ConfiguredWorkspace({
       ? { ownerKey }
       : SKIP,
   ) as NodeSearchResult[] | undefined;
+  const dataDumpExclusionsQueryResult = useQuery(
+    api.workspace.listDataDumpExclusions,
+    ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "dataDumpExclusions"
+      ? { ownerKey }
+      : SKIP,
+  ) as DataDumpExclusionsResult | undefined;
 
   const recomputePendingSyncSnapshot = useCallback(() => {
     const nodeIds = new Set<string>();
@@ -6795,6 +6820,41 @@ function ConfiguredWorkspace({
       ].some((value) => value.toLowerCase().includes(normalizedQuery)),
     );
   }, [pagesById, pagesByTitle, paletteQuery, waitingTaskQueryResults]);
+  const dataDumpExclusionRows = useMemo(() => {
+    if (!dataDumpExclusionsQueryResult) {
+      return [] as DataDumpExclusionRow[];
+    }
+    const rows: DataDumpExclusionRow[] = [
+      ...dataDumpExclusionsQueryResult.pages.map((page) => ({
+        kind: "page" as const,
+        key: `page:${page._id}`,
+        page,
+      })),
+      ...dataDumpExclusionsQueryResult.items.map((item) => ({
+        kind: "item" as const,
+        key: `item:${item.node._id}`,
+        result: { node: item.node, page: item.page, parentNode: item.parentNode },
+        alsoCoveredBy: item.alsoCoveredBy,
+      })),
+    ];
+    const normalizedQuery = paletteQuery.trim().toLowerCase();
+    if (normalizedQuery.length === 0) {
+      return rows;
+    }
+    return rows.filter((row) =>
+      (row.kind === "page"
+        ? [row.page.title]
+        : [
+            row.result.node.text,
+            normalizeNodeLinkPreviewDisplay(row.result.node.text, {
+              pagesByTitle,
+              pagesById,
+            }).text,
+            row.result.page?.title ?? "",
+          ]
+      ).some((value) => value.toLowerCase().includes(normalizedQuery)),
+    );
+  }, [dataDumpExclusionsQueryResult, pagesById, pagesByTitle, paletteQuery]);
   const workspaceChatMessages = workspaceKnowledgeThread?.messages ?? [];
   const embeddingProgressLabel = useMemo(() => {
     if (!embeddingRebuildProgress) {
@@ -8869,6 +8929,28 @@ function ConfiguredWorkspace({
         },
       },
       {
+        key: "show-data-dump-exclusions",
+        title: "Show Data Dump Exclusions",
+        subtitle:
+          "See every page and item excluded from data dumps, jump to one, or include it again.",
+        keywords: [
+          "export",
+          "data",
+          "dump",
+          "exclude",
+          "excluded",
+          "include",
+          "hidden",
+          "backup",
+          "list",
+        ],
+        actionLabel: "Open",
+        onSelect: () => {
+          switchPaletteMode("dataDumpExclusions");
+          setPaletteOpen(true);
+        },
+      },
+      {
         key: "toggle-children-link-autocomplete",
         title: isLinkAutocompleteContextHidden
           ? "Show Children In Link Autocomplete"
@@ -9319,6 +9401,8 @@ function ConfiguredWorkspace({
         ? overdueTaskResults.length
       : paletteMode === "waitingTasks"
         ? waitingTaskResults.length
+      : paletteMode === "dataDumpExclusions"
+        ? dataDumpExclusionRows.length
         : paletteMode === "actions"
             ? actionResults.length
             : 0;
@@ -11821,6 +11905,47 @@ function ConfiguredWorkspace({
     setNodeSearchResults([]);
   }, [clearNodeSelection, openNodeInFocusedView]);
 
+  const openDataDumpExclusionRow = useCallback(
+    (row: DataDumpExclusionRow) => {
+      if (row.kind === "page") {
+        handleSelectPage(row.page._id as Id<"pages">);
+        return;
+      }
+      handleSelectNodeSearchResult(row.result);
+    },
+    [handleSelectNodeSearchResult, handleSelectPage],
+  );
+
+  const includeDataDumpExclusionRow = useCallback(
+    (row: DataDumpExclusionRow) => {
+      if (!ownerKey) {
+        return;
+      }
+      const request =
+        row.kind === "page"
+          ? setPageDataDumpExcluded({
+              ownerKey,
+              pageId: row.page._id as Id<"pages">,
+              excluded: false,
+            })
+          : setNodeDataDumpExcluded({
+              ownerKey,
+              nodeIds: [row.result.node._id as Id<"nodes">],
+              excluded: false,
+            });
+      void Promise.resolve(request)
+        .then(() => {
+          setCopySnackbarMessage(
+            row.kind === "page"
+              ? "Included this page in data dumps"
+              : "Included this item in data dumps",
+          );
+        })
+        .catch(() => undefined);
+    },
+    [ownerKey, setNodeDataDumpExcluded, setPageDataDumpExcluded],
+  );
+
   const handleOpenLinkedNode = useCallback((pageId: Id<"pages">, nodeId: Id<"nodes">) => {
     openNodeInFocusedView(pageId, nodeId);
   }, [openNodeInFocusedView]);
@@ -12492,6 +12617,14 @@ function ConfiguredWorkspace({
         const highlighted = actionResults[paletteHighlightIndex];
         if (highlighted) {
           void highlighted.onSelect();
+        }
+        return;
+      }
+
+      if (paletteMode === "dataDumpExclusions") {
+        const highlighted = dataDumpExclusionRows[paletteHighlightIndex];
+        if (highlighted) {
+          openDataDumpExclusionRow(highlighted);
         }
         return;
       }
@@ -15169,6 +15302,17 @@ function ConfiguredWorkspace({
                     Waiting
                   </button>
                 ) : null}
+                {paletteMode === "dataDumpExclusions" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      switchPaletteMode("dataDumpExclusions");
+                    }}
+                    className="border border-[var(--workspace-brand)] bg-[var(--workspace-brand)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--workspace-inverse-text)] transition"
+                  >
+                    Dump Exclusions
+                  </button>
+                ) : null}
                 {paletteMode === "archive" ? (
                   <button
                     type="button"
@@ -15325,6 +15469,8 @@ function ConfiguredWorkspace({
                               ? "Filter past due tasks..."
                             : paletteMode === "waitingTasks"
                               ? "Filter waiting tasks..."
+                            : paletteMode === "dataDumpExclusions"
+                              ? "Filter excluded pages and items..."
                               : "Run a workspace action..."
                     }
                     className="w-full border-0 bg-transparent p-0 text-lg outline-none"
@@ -15600,6 +15746,81 @@ function ConfiguredWorkspace({
                         #waiting
                       </span>
                     </button>
+                  );
+                })
+              ) : paletteMode === "dataDumpExclusions" ? typeof dataDumpExclusionsQueryResult === "undefined" ? (
+                <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
+                  Loading data dump exclusions...
+                </p>
+              ) : dataDumpExclusionRows.length === 0 ? (
+                <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
+                  {paletteQuery.trim().length > 0
+                    ? "No matching exclusions."
+                    : "Nothing is excluded from data dumps."}
+                </p>
+              ) : (
+                dataDumpExclusionRows.map((row, index) => {
+                  const title =
+                    row.kind === "page"
+                      ? row.page.title || "(untitled page)"
+                      : normalizeNodeLinkPreviewDisplay(row.result.node.text, {
+                          pagesByTitle,
+                          pagesById,
+                        }).text ||
+                        row.result.node.text ||
+                        "(empty item)";
+                  const archived =
+                    row.kind === "page" ? row.page.archived : row.result.node.archived;
+                  const subtitle = [
+                    row.kind === "page" ? "Page" : getNodeSearchResultSubtitle(row.result),
+                    archived ? "Archived" : "",
+                    row.kind === "item" && row.alsoCoveredBy === "page"
+                      ? "Its page is excluded too"
+                      : row.kind === "item" && row.alsoCoveredBy === "ancestor"
+                        ? "A parent item is excluded too"
+                        : "",
+                  ]
+                    .filter((part) => part.length > 0)
+                    .join(" • ");
+
+                  return (
+                    <div
+                      key={row.key}
+                      data-palette-item-index={index}
+                      onMouseEnter={() => setPaletteHighlightIndex(index)}
+                      className={clsx(
+                        "flex w-full items-start justify-between gap-3 px-5 py-3 transition",
+                        index === paletteHighlightIndex
+                          ? "bg-[var(--workspace-sidebar-bg)]"
+                          : "hover:bg-[var(--workspace-surface-hover)]",
+                      )}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => openDataDumpExclusionRow(row)}
+                        className="min-w-0 flex-1 text-left"
+                        title={row.kind === "page" ? "Open this page" : "Jump to this item"}
+                      >
+                        <span className="block truncate text-sm font-medium text-[var(--workspace-text)]">
+                          {title}
+                        </span>
+                        <span className="mt-1 block text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                          {subtitle}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => includeDataDumpExclusionRow(row)}
+                        className="shrink-0 rounded-full border border-[var(--workspace-brand)] px-2 py-1 text-[11px] uppercase tracking-[0.14em] text-[var(--workspace-brand)] transition hover:bg-[var(--workspace-brand)] hover:text-[var(--workspace-inverse-text)]"
+                        title={
+                          row.kind === "page"
+                            ? "Include this page in future data dumps"
+                            : "Include this item in future data dumps"
+                        }
+                      >
+                        Include
+                      </button>
+                    </div>
                   );
                 })
               ) : paletteMode === "actions" ? (
