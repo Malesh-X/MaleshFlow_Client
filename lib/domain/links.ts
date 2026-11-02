@@ -886,3 +886,135 @@ export function applySelectedLinkShortcut(
     selectionEnd: start + replacement.length,
   };
 }
+
+export type LinkPasteOverSelectionResult = {
+  value: string;
+  selectionStart: number;
+  selectionEnd: number;
+  linkKind: "node" | "page";
+};
+
+// Turns a copied link into a wiki link target, without any label. Returns
+// null unless the text is exactly one node link or page-id link.
+function getLinkPasteTarget(clipboardText: string) {
+  const token = clipboardText.trim();
+  const matches = extractLinkMatches(token);
+  if (matches.length !== 1) {
+    return null;
+  }
+  const [match] = matches;
+  if (!match || match.start !== 0 || match.end !== token.length) {
+    return null;
+  }
+
+  if (match.link.kind === "node" && token.startsWith("((")) {
+    return { kind: "node" as const, target: `node:${match.link.targetNodeRef}`, trailing: "" };
+  }
+
+  if (!token.startsWith("[[")) {
+    return null;
+  }
+  const closeIndex = token.indexOf("]]");
+  const inner = token.slice(2, closeIndex).trim();
+  const trailing = token.slice(closeIndex + 2);
+
+  if (match.link.kind === "page" && match.link.targetPageRef) {
+    const pageMatch = inner.match(PAGE_WIKI_TARGET_PATTERN);
+    if (!pageMatch) {
+      return null;
+    }
+    return {
+      kind: "page" as const,
+      target: `page:${pageMatch[2]}${pageMatch[3] ?? ""}`,
+      trailing,
+    };
+  }
+
+  if (match.link.kind === "node") {
+    const nodeMatch = inner.match(NODE_WIKI_TARGET_PATTERN);
+    if (nodeMatch) {
+      return {
+        kind: "node" as const,
+        target: `node:${nodeMatch[2]}${nodeMatch[3] ?? ""}`,
+        trailing,
+      };
+    }
+    const bareMatch = inner.match(BARE_NODE_WIKI_TARGET_WITH_OPTIONS_PATTERN);
+    if (bareMatch) {
+      return {
+        kind: "node" as const,
+        target: `node:${bareMatch[1]}${bareMatch[2] ?? ""}`,
+        trailing,
+      };
+    }
+  }
+
+  return null;
+}
+
+// Pasting one copied node or page link over selected text wraps the selection
+// as that link's label. Returns null whenever a normal paste should happen.
+export function applyLinkPasteOverSelection(
+  text: string,
+  selectionStart: number,
+  selectionEnd: number,
+  clipboardText: string,
+): LinkPasteOverSelectionResult | null {
+  const start = Math.max(0, Math.min(selectionStart, selectionEnd));
+  const end = Math.min(text.length, Math.max(selectionStart, selectionEnd));
+  if (start >= end) {
+    return null;
+  }
+
+  const selected = text.slice(start, end);
+  if (/[\r\n]/.test(selected)) {
+    return null;
+  }
+  const label = selected.trim();
+  // The wiki link syntax has no escapes: brackets end the link and "|"
+  // splits the label from the target.
+  if (label.length === 0 || /[[\]|]/.test(label)) {
+    return null;
+  }
+
+  const target = getLinkPasteTarget(clipboardText);
+  if (!target) {
+    return null;
+  }
+
+  const overlapsLink = extractLinkMatches(text).some((match) =>
+    rangesOverlap(match, { start, end }),
+  );
+  if (overlapsLink) {
+    return null;
+  }
+
+  const labelStart = start + (selected.length - selected.trimStart().length);
+  const labelEnd = labelStart + label.length;
+  const replacement = `[[${label}|${target.target}]]${target.trailing}`;
+  const value = `${text.slice(0, labelStart)}${replacement}${text.slice(labelEnd)}`;
+  const replacementEnd = labelStart + replacement.length;
+
+  // The result must parse back as exactly this one link over the new span.
+  const newMatches = extractLinkMatches(value).filter((match) =>
+    rangesOverlap(match, { start: labelStart, end: replacementEnd }),
+  );
+  const [newMatch] = newMatches;
+  if (
+    newMatches.length !== 1 ||
+    !newMatch ||
+    newMatch.start !== labelStart ||
+    newMatch.end !== replacementEnd ||
+    newMatch.link.kind !== target.kind ||
+    getExplicitWikiLinkPreviewText(newMatch.link.label) !== label
+  ) {
+    return null;
+  }
+
+  return {
+    value,
+    selectionStart: replacementEnd,
+    selectionEnd: replacementEnd,
+    linkKind: target.kind,
+  };
+}

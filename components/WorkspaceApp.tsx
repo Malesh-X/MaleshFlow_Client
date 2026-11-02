@@ -90,6 +90,7 @@ import {
   type SidebarSection,
 } from "@/lib/domain/workspaceRules";
 import {
+  applyLinkPasteOverSelection,
   applySelectedLinkShortcut,
   convertHtmlClipboardToMarkdownText,
   extractLinkMatches,
@@ -18640,6 +18641,27 @@ function OutlineNodeEditor({
       return;
     }
 
+    const linkPaste = applyLinkPasteOverSelection(
+      draftRef.current,
+      event.currentTarget.selectionStart ?? 0,
+      event.currentTarget.selectionEnd ?? 0,
+      event.clipboardData.getData("text"),
+    );
+    if (linkPaste) {
+      event.preventDefault();
+      setDraft(linkPaste.value);
+      history.updateDraftValue(editorId, editorTarget, linkPaste.value);
+      setCaretPosition(linkPaste.selectionEnd);
+      window.requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(
+          linkPaste.selectionStart,
+          linkPaste.selectionEnd,
+        );
+      });
+      return;
+    }
+
     if (lines.length <= 1) {
       if (!isRichLinkPaste) {
         return;
@@ -20814,6 +20836,27 @@ function InlineComposer({
 
   const handlePaste = async (event: TextareaClipboardEvent<HTMLTextAreaElement>) => {
     if (readOnly || isSubmittingRef.current) {
+      return;
+    }
+
+    const linkPaste = applyLinkPasteOverSelection(
+      draftRef.current,
+      event.currentTarget.selectionStart ?? 0,
+      event.currentTarget.selectionEnd ?? 0,
+      event.clipboardData.getData("text"),
+    );
+    if (linkPaste) {
+      event.preventDefault();
+      setDraft(linkPaste.value);
+      history.updateDraftValue(editorId, editorTarget, linkPaste.value);
+      setCaretPosition(linkPaste.selectionEnd);
+      window.requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(
+          linkPaste.selectionStart,
+          linkPaste.selectionEnd,
+        );
+      });
       return;
     }
 
