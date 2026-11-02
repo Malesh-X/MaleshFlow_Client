@@ -145,7 +145,7 @@ toolbar, and other workspace navigation.
 Audit runtime callers before deleting code. The final backend should no longer
 expose active APIs for these retired features.
 
-Candidates for removal after the compatibility stage:
+Candidates for removal in the combined feature-removal release:
 
 - Inbox: `getWorkspaceInbox`, `setWorkspaceInbox`, `clearWorkspaceInbox`, and
   the now-unused Inbox History creation helper.
@@ -159,6 +159,17 @@ Candidates for removal after the compatibility stage:
   they have no caller outside the retired chat flows.
 - Unused chat-only domain types, prompts, parsing helpers, and corresponding
   tests after retained callers have been accounted for.
+
+The current `getAiWorkingMemoryContext` call chain has been checked:
+
+- `answerWorkspaceQuestionInternal` reads it and is reached through
+  `answerWorkspaceQuestion` and `chatWithWorkspace`.
+- `maybePlanAiWorkingMemoryAction` also reads it, but is called only by
+  `chatWithWorkspace`.
+
+Both branches belong to the retired workspace-chat functionality; no retained
+feature currently reaches the memory-action branch. Remove these branches
+together, and repeat the caller search during implementation if code changes.
 
 Preserve `rewriteModelSection`, `generateJournalFeedback`, and the helpers they
 call. Model rewriting currently uses `ensureChatThread`, `getThreadMessages`,
@@ -196,20 +207,18 @@ of this implementation.
 1. **Resolve Links safety.** Add the shared backend guard and additive result
    metadata, then the menu/parent checks and accurate reporting. Verify both
    public mutations and the UI. This can ship independently.
-2. **Frontend feature removal.** Remove all three interfaces, subscriptions,
-   client behavior, and navigation/preferences. Keep the existing dedicated
-   endpoints temporarily for compatibility with already-open older clients.
-3. **Backend retirement.** After the compatibility cutoff, remove dedicated
-   APIs and unreachable helpers, preserve shared functionality and export
-   readers, and regenerate API types.
+2. **Combined feature removal.** Remove all three interfaces, subscriptions,
+   client behavior, navigation/preferences, dedicated APIs, and unreachable
+   helpers in one release. Preserve shared functionality and export readers,
+   and regenerate API types.
 
-Older workspace builds subscribe to these queries even when their panels are
-closed. Before step 3, establish a concrete refresh/version cutoff or verify
-that older sessions no longer depend on them. Account for in-flight autosaves;
-do not drop their endpoints merely because the new UI has shipped. A build
-cutoff must let users finish saving or export pending text before retiring
-the old build. Temporary compatibility code is a rollout measure, not the
-final feature implementation.
+This is a single-user workspace. Before deploying feature removal, make sure
+Inbox, Random Box, and AI memory edits are saved and their autosaves have
+finished. After the frontend and backend deployment finishes, reload all open
+workspace tabs to load the new build. Older builds subscribe to retired
+queries even when the panels are closed, so reloading applies to every open
+workspace tab. No compatibility release, temporary endpoints, or version-cutoff
+machinery is required.
 
 Each implementation release should have focused commits and verification.
 Pushes to `master` trigger the configured Vercel/Convex deployment, so finish
@@ -219,41 +228,40 @@ for Inbox or Random Box there.
 
 ## Verification
 
-### Automated Coverage
+### Required Automated Coverage
 
-- Backend mutation tests: single-source self-target, multi-source target that
-  is also a source, multiple self-link occurrences, effective-parent self-link,
-  direct calls to both public mutations, and archived/missing target errors.
-- Batch tests: target skipped before batch limits, multiple replacement
-  batches, deduplicated skipped counts, self-only no-op, and finite progress.
-- UI tests: single-source menu exclusion, bulk source-target availability,
-  parent-target validation, accurate completion messages, and residual groups.
-- Regression tests: compact matching-label node links, custom labels,
-  page-target replacement, shortest-label ordering, and inline autocomplete's
-  Shift-parent behavior.
-- Navigation tests: retired chat URL, browser history, saved chat preferences,
-  retained page/focused-node parameters, and retained palette URL round trips.
-- Export tests: saved multi-box and legacy single-box content remains present
-  in the same data-dump files after dedicated APIs are removed.
-- Shared-feature checks: model rewriting and journal feedback still resolve
-  their backend dependencies; search, symbols, screenshot import, embeddings,
-  and planner task suggestions retain their entry points and API references.
+Keep new coverage focused on four areas:
 
-Test the server rule at mutation level, not only through a client filter or a
+1. **Mutation-level self-link protection.** Cover both public entry points,
+   a self-only target, and a target that is also one of several source items.
+   Verify that the target stays unchanged while other matching items resolve.
+2. **Batch progress.** A skipped self-link must not consume replacement slots
+   or keep `hasMore` true after eligible replacements are exhausted. Check
+   self-only termination and skipped counts across multiple batches.
+3. **Retired chat URL.** An old `panel=ai-chat` URL opens the underlying page
+   or focused node, clears retired panel parameters, and preserves unrelated
+   location parameters.
+4. **Export preservation.** Saved multi-box and legacy single-box Inbox/Random
+   Box content remains in the same data-dump files after API removal.
+
+Test the server rule through mutations, not only through a client filter or
 pure helper. Follow the project's Convex test guidelines when adding coverage.
 
-### Manual Acceptance
+### One Manual Acceptance Pass
 
-- On desktop and mobile, the three feature buttons, panels, menus, shortcuts,
-  and reserved layout space are absent.
-- Remaining floating controls and pinned actions fit and work correctly.
-- Normal editing, undo/redo, selection, scheduling, page navigation, and the
-  command palette still work, including mobile keyboard controls.
-- An old AI Chat URL opens the underlying page with the correct browser title.
-- Resolve a label from several items into one of those items: the others
-  resolve, the target stays unchanged, and the notification reports the skip.
-- Exercise retained AI actions on development data and verify a data dump
-  still includes saved Inbox/Random Box content.
+- Check desktop and mobile: the three features' buttons, panels, menus,
+  shortcuts, and reserved space are absent; remaining floating controls and
+  pinned actions fit and work.
+- Exercise editing, undo/redo, selection, scheduling, page navigation, the
+  command palette, and mobile keyboard controls.
+- Check old bookmarks, Back/Forward, saved chat preferences, and browser titles.
+- Check resolver menu exclusion, multi-source targets, parent targeting,
+  skipped-link messages, and residual unresolved groups.
+- Verify shortest-label ordering, compact/custom/page link replacements, and
+  inline autocomplete's Shift-click and Shift+Enter parent behavior.
+- Exercise retained AI actions on development data: model rewriting, journal
+  feedback, search, symbol mode, screenshot import, and planner task suggestions.
+  Check that retained embedding jobs still run.
 
 ### Required Implementation Checks
 
@@ -264,8 +272,8 @@ npm run lint
 npm run build
 ```
 
-Run these checks for application changes, together with focused mutation/UI
-tests and desktop/mobile inspection. Document any pre-existing warnings.
+Run these checks for application changes, together with the four focused test
+areas and one manual pass above. Document any pre-existing warnings.
 For the plan-document-only commit, run formatting and diff checks. Do not
 invoke a manual Convex deployment; the existing push pipeline may still run.
 
@@ -274,9 +282,10 @@ invoke a manual Convex deployment; the existing push pipeline may still run.
 - [ ] Both resolver mutations prevent newly created direct self-links.
 - [ ] Menu, parent targeting, batching, and reporting follow the rules above.
 - [ ] AI Chat, Inbox, and Random Box have no active UI or client behavior.
-- [ ] Dedicated backend APIs are retired after the compatibility cutoff.
+- [ ] Dedicated backend APIs are removed in the feature-removal release.
 - [ ] Existing content, shared tables, exports, and retained features survive.
 - [ ] Focused tests, required checks, and manual acceptance pass.
+- [ ] Pending text is saved before deployment; open tabs are reloaded afterward.
 - [ ] Implementation commits are pushed and the deployment is verified.
 
 Implementation is complete only when backend retirement is finished; hiding
