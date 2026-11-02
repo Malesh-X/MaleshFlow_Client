@@ -1,3 +1,4 @@
+import { workspaceTimeZoneFor } from "./workspaceSettings";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { DatabaseReader, MutationCtx } from "../_generated/server";
 import {
@@ -509,6 +510,7 @@ async function syncPlannerLinkedSourceTaskCompletion(
         dueEndAt: sourceTask.dueEndAt ?? null,
         frequency: recurrenceFrequency,
         mode: completionMode,
+        timeZone: await workspaceTimeZoneFor(ctx.db, sourceTask),
       });
       await ctx.db.patch(sourceTask._id, {
         taskStatus: "todo",

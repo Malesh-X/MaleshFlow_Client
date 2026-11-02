@@ -1,5 +1,5 @@
 import slugify from "slugify";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import {
   internalMutation,
@@ -107,6 +107,8 @@ import {
   withGuards,
 } from "./lib/guards";
 import { changeForUpdate } from "./lib/guardRules";
+import { isValidTimeZone } from "../lib/domain/timeZone";
+import { readWorkspaceSettings, workspaceTimeZoneFor, writeWorkspaceSettings } from "./lib/workspaceSettings";
 
 function getTimestamp() {
   return Date.now();
@@ -2475,6 +2477,38 @@ export const setWorkspaceAiMemory = mutation({
       pageId: sidebarPage._id,
       text,
     };
+  },
+});
+
+// Workspace time zone (for date math) and default completion mode for
+// recurring items. See convex/lib/workspaceSettings.ts.
+export const getWorkspaceSettings = query({
+  args: {
+    ownerKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    return await readWorkspaceSettings(ctx.db);
+  },
+});
+
+export const setWorkspaceSettings = mutation({
+  args: {
+    ownerKey: v.string(),
+    timeZone: v.optional(v.union(v.string(), v.null())),
+    completionMode: v.optional(v.union(v.literal("dueDate"), v.literal("today"), v.null())),
+  },
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setWorkspaceSettings");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const requestedZone = args.timeZone ?? null;
+    if (requestedZone !== null && !isValidTimeZone(requestedZone)) {
+      throw new ConvexError(`Unknown time zone "${String(args.timeZone)}".`);
+    }
+    return await writeWorkspaceSettings(ctx, {
+      ...(args.timeZone !== undefined ? { timeZone: args.timeZone } : {}),
+      ...(args.completionMode !== undefined ? { completionMode: args.completionMode } : {}),
+    });
   },
 });
 
@@ -5388,6 +5422,7 @@ export const completeTaskPageTask = mutation({
           dueEndAt: node.dueEndAt ?? null,
           frequency: recurrenceFrequency,
           mode: args.completionMode,
+          timeZone: await workspaceTimeZoneFor(ctx.db, node),
         });
         nextPatch.taskStatus = "todo";
         nextPatch.dueAt = nextRange.dueAt;

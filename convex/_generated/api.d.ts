@@ -28,6 +28,7 @@ import type * as lib_guards from "../lib/guards.js";
 import type * as lib_planner from "../lib/planner.js";
 import type * as lib_validators from "../lib/validators.js";
 import type * as lib_workspace from "../lib/workspace.js";
+import type * as lib_workspaceSettings from "../lib/workspaceSettings.js";
 import type * as migration from "../migration.js";
 import type * as migrationData from "../migrationData.js";
 import type * as planner from "../planner.js";
@@ -63,6 +64,7 @@ declare const fullApi: ApiFromModules<{
   "lib/planner": typeof lib_planner;
   "lib/validators": typeof lib_validators;
   "lib/workspace": typeof lib_workspace;
+  "lib/workspaceSettings": typeof lib_workspaceSettings;
   migration: typeof migration;
   migrationData: typeof migrationData;
   planner: typeof planner;

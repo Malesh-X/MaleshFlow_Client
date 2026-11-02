@@ -1,3 +1,5 @@
+import { addCalendarUnits, zonedCalendarDate, zonedNoon, type CalendarDate } from "./timeZone";
+
 export const RECURRENCE_FREQUENCIES = [
   "daily",
   "weekly",
@@ -97,7 +99,10 @@ function toLocalNoon(date: Date) {
   );
 }
 
-export function getTodayReferenceDate(now = new Date()) {
+// Noon today. With a time zone, "today" is the date in that zone; without one,
+// the runtime's local zone (the browser). The server always passes one.
+export function getTodayReferenceDate(now = new Date(), timeZone?: string | null) {
+  if (timeZone) return new Date(zonedNoon(zonedCalendarDate(now.getTime(), timeZone), timeZone));
   return toLocalNoon(now);
 }
 
@@ -273,48 +278,56 @@ export function getCompactRecurrenceLabel(frequency: RecurrenceFrequency) {
   return `${parsedFrequency.interval}${unitLabel}`;
 }
 
+function recurrenceStep(frequency: Exclude<RecurrenceFrequency, null>): { unit: RecurrenceUnit; amount: number } {
+  if (isRecurrencePreset(frequency)) {
+    return {
+      daily: { unit: "day" as const, amount: 1 },
+      weekly: { unit: "week" as const, amount: 1 },
+      monthly: { unit: "month" as const, amount: 1 },
+      yearly: { unit: "year" as const, amount: 1 },
+    }[frequency];
+  }
+  return { unit: frequency.unit, amount: frequency.interval };
+}
+
+// The next due date (noon) after completing a recurring item. "dueDate" counts
+// from the current due date, "today" from today. Pass `timeZone` (the item's
+// zone, else the workspace zone) so the browser and the UTC server agree;
+// without it the runtime's local zone is used.
 export function advanceRecurringDueDate(args: {
   dueAt: number;
   frequency: Exclude<RecurrenceFrequency, null>;
   mode: RecurringCompletionMode;
   now?: Date;
+  timeZone?: string | null;
 }) {
+  const step = recurrenceStep(args.frequency);
+  if (args.timeZone) {
+    const base: CalendarDate = zonedCalendarDate(
+      args.mode === "today" ? (args.now ?? new Date()).getTime() : args.dueAt,
+      args.timeZone,
+    );
+    return zonedNoon(addCalendarUnits(base, step.unit, step.amount), args.timeZone);
+  }
+
   const baseDate =
     args.mode === "today"
       ? getTodayReferenceDate(args.now)
       : toLocalNoon(new Date(args.dueAt));
   const nextDate = new Date(baseDate);
-
-  if (isRecurrencePreset(args.frequency)) {
-    switch (args.frequency) {
-      case "daily":
-        nextDate.setDate(nextDate.getDate() + 1);
-        break;
-      case "weekly":
-        nextDate.setDate(nextDate.getDate() + 7);
-        break;
-      case "monthly":
-        nextDate.setMonth(nextDate.getMonth() + 1);
-        break;
-      case "yearly":
-        nextDate.setFullYear(nextDate.getFullYear() + 1);
-        break;
-    }
-  } else {
-    switch (args.frequency.unit) {
-      case "day":
-        nextDate.setDate(nextDate.getDate() + args.frequency.interval);
-        break;
-      case "week":
-        nextDate.setDate(nextDate.getDate() + args.frequency.interval * 7);
-        break;
-      case "month":
-        nextDate.setMonth(nextDate.getMonth() + args.frequency.interval);
-        break;
-      case "year":
-        nextDate.setFullYear(nextDate.getFullYear() + args.frequency.interval);
-        break;
-    }
+  switch (step.unit) {
+    case "day":
+      nextDate.setDate(nextDate.getDate() + step.amount);
+      break;
+    case "week":
+      nextDate.setDate(nextDate.getDate() + step.amount * 7);
+      break;
+    case "month":
+      nextDate.setMonth(nextDate.getMonth() + step.amount);
+      break;
+    case "year":
+      nextDate.setFullYear(nextDate.getFullYear() + step.amount);
+      break;
   }
 
   return toLocalNoon(nextDate).getTime();
@@ -326,12 +339,14 @@ export function advanceRecurringDueDateRange(args: {
   frequency: Exclude<RecurrenceFrequency, null>;
   mode: RecurringCompletionMode;
   now?: Date;
+  timeZone?: string | null;
 }) {
   const nextDueAt = advanceRecurringDueDate({
     dueAt: args.dueAt,
     frequency: args.frequency,
     mode: args.mode,
     now: args.now,
+    timeZone: args.timeZone,
   });
 
   if (!args.dueEndAt || args.dueEndAt <= args.dueAt) {

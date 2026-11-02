@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { TaskStatus } from "./constants";
 import { formatDueDate, getTodayReferenceDate, isOverdueDueDateRange } from "./recurrence";
+import { addCalendarUnits, zonedCalendarDate, zonedNoon, zonedWeekday } from "./timeZone";
 import { extractLinkMatches } from "./links";
 import { stripInlineFormattingMarkers } from "./inlineFormatting";
 
@@ -227,13 +228,16 @@ export function getPlannerMergeDuplicateResolution(
   return { duplicate: true, keep, reason: "prefix" };
 }
 
-function getPlannerDayDate(timestamp: number) {
+// Noon on the calendar day `timestamp` falls on: in `timeZone` when given (the
+// server always passes one), else in the runtime's local zone.
+function getPlannerDayDate(timestamp: number, timeZone?: string | null) {
+  if (timeZone) return new Date(zonedNoon(zonedCalendarDate(timestamp, timeZone), timeZone));
   const date = new Date(timestamp);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0, 0);
 }
 
-export function getPlannerWeekdayName(timestamp: number): PlannerWeekdayName {
-  const weekday = new Date(timestamp).getDay();
+export function getPlannerWeekdayName(timestamp: number, timeZone?: string | null): PlannerWeekdayName {
+  const weekday = timeZone ? zonedWeekday(timestamp, timeZone) : new Date(timestamp).getDay();
   switch (weekday) {
     case 0:
       return "Sunday";
@@ -265,7 +269,10 @@ export function formatPlannerStartDateLabel(timestamp: number | null | undefined
   return `Starts ${formatDueDate(timestamp)}`;
 }
 
-export function addPlannerCalendarDays(timestamp: number, days: number) {
+export function addPlannerCalendarDays(timestamp: number, days: number, timeZone?: string | null) {
+  if (timeZone) {
+    return zonedNoon(addCalendarUnits(zonedCalendarDate(timestamp, timeZone), "day", days), timeZone);
+  }
   const base = getPlannerDayDate(timestamp);
   base.setDate(base.getDate() + days);
   return base.getTime();
@@ -275,14 +282,15 @@ export function plannerDayMatchesDueDateRange(args: {
   dayTimestamp: number;
   dueAt: number | null;
   dueEndAt?: number | null;
+  timeZone?: string | null;
 }) {
   if (!args.dueAt) {
     return false;
   }
 
-  const day = getPlannerDayDate(args.dayTimestamp).getTime();
-  const dueStart = getPlannerDayDate(args.dueAt).getTime();
-  const dueEnd = getPlannerDayDate(args.dueEndAt ?? args.dueAt).getTime();
+  const day = getPlannerDayDate(args.dayTimestamp, args.timeZone).getTime();
+  const dueStart = getPlannerDayDate(args.dueAt, args.timeZone).getTime();
+  const dueEnd = getPlannerDayDate(args.dueEndAt ?? args.dueAt, args.timeZone).getTime();
 
   return day >= dueStart && day <= dueEnd;
 }
@@ -291,14 +299,15 @@ export function getPlannerDateRangeBoundary(args: {
   dayTimestamp: number;
   dueAt: number | null;
   dueEndAt?: number | null;
+  timeZone?: string | null;
 }) {
   if (!args.dueAt) {
     return null;
   }
 
-  const day = getPlannerDayDate(args.dayTimestamp).getTime();
-  const dueStart = getPlannerDayDate(args.dueAt).getTime();
-  const dueEnd = getPlannerDayDate(args.dueEndAt ?? args.dueAt).getTime();
+  const day = getPlannerDayDate(args.dayTimestamp, args.timeZone).getTime();
+  const dueStart = getPlannerDayDate(args.dueAt, args.timeZone).getTime();
+  const dueEnd = getPlannerDayDate(args.dueEndAt ?? args.dueAt, args.timeZone).getTime();
   if (dueEnd <= dueStart) {
     return null;
   }
@@ -318,14 +327,15 @@ export function plannerDayMatchesDueDateBoundary(args: {
   dayTimestamp: number;
   dueAt: number | null;
   dueEndAt?: number | null;
+  timeZone?: string | null;
 }) {
   if (!args.dueAt) {
     return false;
   }
 
-  const day = getPlannerDayDate(args.dayTimestamp).getTime();
-  const dueStart = getPlannerDayDate(args.dueAt).getTime();
-  const dueEnd = getPlannerDayDate(args.dueEndAt ?? args.dueAt).getTime();
+  const day = getPlannerDayDate(args.dayTimestamp, args.timeZone).getTime();
+  const dueStart = getPlannerDayDate(args.dueAt, args.timeZone).getTime();
+  const dueEnd = getPlannerDayDate(args.dueEndAt ?? args.dueAt, args.timeZone).getTime();
   if (dueEnd > dueStart) {
     return getPlannerDateRangeBoundary(args) !== null;
   }

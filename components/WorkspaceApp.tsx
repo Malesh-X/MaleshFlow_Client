@@ -75,6 +75,7 @@ import {
   type RecurrenceFrequency,
   type RecurringCompletionMode,
 } from "@/lib/domain/recurrence";
+import { resolveTimeZone } from "@/lib/domain/timeZone";
 import {
   applySelectedLinkShortcut,
   convertHtmlClipboardToMarkdownText,
@@ -2008,9 +2009,11 @@ function getRecurringCompletionTransition(
     taskStatus: string | null;
     dueAt: number | null;
     dueEndAt?: number | null;
+    dueTimeZone?: string | null;
     sourceMeta?: Record<string, unknown> | null;
   },
   completionMode: RecurringCompletionMode,
+  workspaceTimeZone?: string | null,
 ): NodeValueSnapshot | null {
   const recurrenceFrequency = getNodeRecurrenceFrequency(node);
   if (node.kind !== "task" || recurrenceFrequency === null || !node.dueAt) {
@@ -2034,6 +2037,7 @@ function getRecurringCompletionTransition(
     dueEndAt: node.dueEndAt ?? null,
     frequency: recurrenceFrequency,
     mode: completionMode,
+    timeZone: resolveTimeZone(node.dueTimeZone, workspaceTimeZone),
   });
 
   return {
@@ -4732,6 +4736,57 @@ function ConfiguredWorkspace({
   const clearWorkspaceInbox = useMutation(api.workspace.clearWorkspaceInbox);
   const setWorkspaceRandomBox = useMutation(api.workspace.setWorkspaceRandomBox);
   const setWorkspaceAiMemory = useMutation(api.workspace.setWorkspaceAiMemory);
+  const setWorkspaceSettings = useMutation(api.workspace.setWorkspaceSettings);
+  const workspaceSettings = useQuery(
+    api.workspace.getWorkspaceSettings,
+    ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
+  );
+  const workspaceTimeZone = workspaceSettings?.timeZone ?? null;
+  const workspaceSettingsMigratedRef = useRef(false);
+  // First load: save this browser's time zone as the workspace zone, and move
+  // the completion mode from browser storage into workspace settings.
+  useEffect(() => {
+    if (!ownerKey || !workspaceSettings || workspaceSettingsMigratedRef.current) {
+      return;
+    }
+    workspaceSettingsMigratedRef.current = true;
+    const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const storedCompletionMode = readStoredRecurringCompletionMode("dueDate");
+    if (workspaceSettings.completionMode) {
+      setRecurringCompletionMode(workspaceSettings.completionMode);
+    } else {
+      setRecurringCompletionMode(storedCompletionMode);
+    }
+    if (!workspaceSettings.timeZone || !workspaceSettings.completionMode) {
+      void setWorkspaceSettings({
+        ownerKey,
+        ...(!workspaceSettings.timeZone && browserTimeZone ? { timeZone: browserTimeZone } : {}),
+        ...(!workspaceSettings.completionMode ? { completionMode: storedCompletionMode } : {}),
+      });
+    }
+  }, [ownerKey, setWorkspaceSettings, workspaceSettings]);
+  useEffect(() => {
+    if (workspaceSettings?.completionMode) {
+      setRecurringCompletionMode(workspaceSettings.completionMode);
+    }
+  }, [workspaceSettings?.completionMode]);
+  const handleRecurringCompletionModeChange = useCallback(
+    (mode: RecurringCompletionMode) => {
+      setRecurringCompletionMode(mode);
+      if (ownerKey) {
+        void setWorkspaceSettings({ ownerKey, completionMode: mode });
+      }
+    },
+    [ownerKey, setWorkspaceSettings],
+  );
+  const handleWorkspaceTimeZoneChange = useCallback(
+    (timeZone: string) => {
+      if (ownerKey) {
+        void setWorkspaceSettings({ ownerKey, timeZone });
+      }
+    },
+    [ownerKey, setWorkspaceSettings],
+  );
   const setSidebarFavoriteRaw = useMutation(api.workspace.setSidebarFavorite);
   const setNodeChildrenLinkAutocompleteHiddenRaw = useMutation(
     api.workspace.setNodeChildrenLinkAutocompleteHidden,
@@ -7178,9 +7233,6 @@ function ConfiguredWorkspace({
     } catch {
       setCollapsedPageSectionKeys(new Set());
     }
-    setRecurringCompletionMode(
-      readStoredRecurringCompletionMode("dueDate"),
-    );
     setPlannerSidebarWidth(readStoredPlannerSidebarWidth());
     setIsPlannerSymbolModeEnabled(
       readStoredLocalBoolean(PLANNER_SYMBOL_MODE_STORAGE_KEY, false),
@@ -7454,16 +7506,6 @@ function ConfiguredWorkspace({
     );
   }, [isLegacySectionCollapsed]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      RECURRING_TASK_COMPLETION_MODE_STORAGE_KEY,
-      recurringCompletionMode,
-    );
-  }, [recurringCompletionMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -10844,7 +10886,7 @@ function ConfiguredWorkspace({
       const beforeSnapshot = toNodeValueSnapshot(node);
       const afterSnapshot: NodeValueSnapshot =
         node.kind === "task"
-          ? (getRecurringCompletionTransition(node, recurringCompletionMode) ??
+          ? (getRecurringCompletionTransition(node, recurringCompletionMode, workspaceTimeZone) ??
             withNodeScheduleSnapshot({
               text: node.text,
               kind: "task",
@@ -10905,7 +10947,7 @@ function ConfiguredWorkspace({
       focusAfterUndoId: historyEntries[0]!.focusEditorId,
       focusAfterRedoId: historyEntries[historyEntries.length - 1]!.focusEditorId,
     });
-  }, [clearNodeSelection, completePlannerTask, completeTaskPageTask, executeNodeUpdateBatch, history, ownerKey, pagesById, recurringCompletionMode, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
+  }, [clearNodeSelection, completePlannerTask, completeTaskPageTask, executeNodeUpdateBatch, history, ownerKey, pagesById, recurringCompletionMode, workspaceTimeZone, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
 
   const deleteHighlightedNodes = useCallback(async () => {
     if (selectedNodeIds.size === 0) {
@@ -16026,7 +16068,9 @@ function ConfiguredWorkspace({
                     dueTimeZone={taskScheduleTargetNode.dueTimeZone ?? null}
                     recurrenceFrequency={getNodeRecurrenceFrequency(taskScheduleTargetNode)}
                     recurringCompletionMode={recurringCompletionMode}
-                    onRecurringCompletionModeChange={setRecurringCompletionMode}
+                    onRecurringCompletionModeChange={handleRecurringCompletionModeChange}
+                    workspaceTimeZone={workspaceTimeZone}
+                    onWorkspaceTimeZoneChange={handleWorkspaceTimeZoneChange}
                     onSave={(args) => handleSaveTaskSchedule(args)}
                     onSaved={() => {
                       setCopySnackbarMessage("Task schedule saved");

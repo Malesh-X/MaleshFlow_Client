@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import { advanceRecurringDueDateRange, parseRecurrenceFrequency } from "../lib/domain/recurrence";
+import { resolveTimeZone } from "../lib/domain/timeZone";
 import {
   SIDEBAR_SECTIONS,
   classifyStrayParent,
@@ -277,8 +278,20 @@ function lastChildId(nodes: TreeNode[], parent: string | null, exclude?: string)
 // Picks the same completion path as the app's task checkbox
 // (toggleSelectedNodesCompletion in components/WorkspaceApp.tsx). Never reopens:
 // an item that is already done is left alone.
+type WorkspaceSettings = { timeZone: string | null; completionMode: "dueDate" | "today" | null };
+async function workspaceSettings(): Promise<WorkspaceSettings> {
+  try {
+    return (await query("workspace:getWorkspaceSettings")) as WorkspaceSettings;
+  } catch {
+    // Deployments from before workspace settings.
+    return { timeZone: null, completionMode: null };
+  }
+}
+
 async function completeLikeApp(nodeId: string) {
-  const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? "dueDate";
+  const settings = await workspaceSettings();
+  // --mode overrides the workspace setting; the app's default is dueDate.
+  const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? settings.completionMode ?? "dueDate";
   const info = (await resolveNodes([nodeId])).get(nodeId);
   if (info?.archived) {
     // Completed planner and task-page items are archived (Past Weeks / Done).
@@ -305,7 +318,13 @@ async function completeLikeApp(nodeId: string) {
   }
   const frequency = parseRecurrenceFrequency(metaOf(node).recurrenceFrequency);
   if (frequency !== null && node.dueAt) {
-    const next = advanceRecurringDueDateRange({ dueAt: node.dueAt, dueEndAt: node.dueEndAt ?? null, frequency, mode: completionMode });
+    const next = advanceRecurringDueDateRange({
+      dueAt: node.dueAt,
+      dueEndAt: node.dueEndAt ?? null,
+      frequency,
+      mode: completionMode,
+      timeZone: resolveTimeZone(node.dueTimeZone, settings.timeZone),
+    });
     console.error(`Recurring task: rolling forward to the next due date (mode ${completionMode}).`);
     await mutation("workspace:updateNode", { nodeId, kind: "task", lockKind: true, taskStatus: "todo", dueAt: next.dueAt, dueEndAt: next.dueEndAt });
     return ok();

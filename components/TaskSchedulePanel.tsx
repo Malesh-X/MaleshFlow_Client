@@ -25,6 +25,9 @@ type TaskSchedulePanelProps = {
   recurrenceFrequency: RecurrenceFrequency;
   recurringCompletionMode: RecurringCompletionMode;
   onRecurringCompletionModeChange: (mode: RecurringCompletionMode) => void;
+  // Workspace time zone for date math (recurring roll-forward, planner days).
+  workspaceTimeZone?: string | null;
+  onWorkspaceTimeZoneChange?: (timeZone: string) => void;
   onSave: (args: {
     dueAt: number | null;
     dueEndAt: number | null;
@@ -44,9 +47,18 @@ export function TaskSchedulePanel({
   recurrenceFrequency,
   recurringCompletionMode,
   onRecurringCompletionModeChange,
+  workspaceTimeZone,
+  onWorkspaceTimeZoneChange,
   onSave,
   onSaved,
 }: TaskSchedulePanelProps) {
+  const timeZoneOptions = useMemo(() => {
+    const zones =
+      typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+    return workspaceTimeZone && !zones.includes(workspaceTimeZone)
+      ? [workspaceTimeZone, ...zones]
+      : zones;
+  }, [workspaceTimeZone]);
   const [dueDateDraft, setDueDateDraft] = useState("");
   const [dueEndDateDraft, setDueEndDateDraft] = useState("");
   const [dueTimeDraft, setDueTimeDraft] = useState("");
@@ -362,6 +374,34 @@ export function TaskSchedulePanel({
               </label>
             </div>
           </div>
+
+          {onWorkspaceTimeZoneChange ? (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                Workspace time zone
+              </p>
+              <p className="mt-1 text-sm text-[var(--workspace-text-subtle)]">
+                Used for recurring dates and planner days on every device.
+              </p>
+              <select
+                aria-label="Workspace time zone"
+                value={workspaceTimeZone ?? ""}
+                onChange={(event) => {
+                  if (event.target.value) {
+                    onWorkspaceTimeZoneChange(event.target.value);
+                  }
+                }}
+                className="mt-3 w-full border border-[var(--workspace-border)] bg-transparent px-3 py-2 text-sm text-[var(--workspace-text)]"
+              >
+                {workspaceTimeZone ? null : <option value="">Not set</option>}
+                {timeZoneOptions.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
 
           {errorMessage ? (
             <p className="text-sm text-[var(--workspace-danger)]">{errorMessage}</p>

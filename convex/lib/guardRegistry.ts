@@ -72,6 +72,7 @@ export const EXEMPT_MUTATIONS: Record<string, string> = {
   "workspace:rebuildEmbeddings": "System maintenance: queues embedding jobs; no node or page edits.",
   "workspace:cancelEmbeddingRebuild": "System maintenance: embedding job state only.",
   "workspace:checkOwnerKey": "Auth check; writes the lockout throttle only.",
+  "workspace:setWorkspaceSettings": "Workspace settings (time zone, completion mode); no tree edits.",
   "workspace:setWorkspaceAiMemory": "Workspace AI memory text; no tree edits.",
   "workspace:setWorkspaceInbox": "Inbox box text; the Inbox is being removed (out of scope).",
   "workspace:clearWorkspaceInbox": "Inbox box text and its history page; the Inbox is being removed (out of scope).",
