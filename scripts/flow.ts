@@ -37,10 +37,11 @@ import {
   type SidebarSection,
   type TreeNode,
 } from "./flowLogic";
+import { collectLinkTargetIds, linkLookup, renderLinks, toStoredLinkText, type LinkLookup, type LinkTargets } from "./flowLinks";
 
 type Spec = { args: string[]; optional?: string[]; flags?: string[]; usage: string };
 
-const GLOBAL_FLAGS = ["prod", "yes", "dry-run", "json"];
+const GLOBAL_FLAGS = ["prod", "yes", "dry-run", "json", "raw"];
 const BOOLEAN_FLAGS = new Set([...GLOBAL_FLAGS, "task", "note"]);
 const COMMANDS: Record<string, Spec> = {
   pages: { args: [], usage: "pages                                  List pages (id, title)" },
@@ -116,7 +117,8 @@ ${Object.values(COMMANDS)
   .join("\n")}
 
 Flags: --prod (production; writes also need --yes), --dry-run (print the writes, don't send),
-       --json (raw output for pages/tree/doctor). Docs: docs/flow-cli.md`;
+       --json (raw output for pages/tree/doctor), --raw (print stored link syntax instead of
+       readable links). Docs: docs/flow-cli.md`;
 
 function fail(message: string): never {
   console.error(message);
@@ -256,6 +258,39 @@ const mutation = async (path: string, args: object = {}): Promise<unknown> => {
 };
 const print = (value: unknown) => console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
 const ok = (value?: unknown) => (dryRun ? console.log("(dry run: nothing was sent)") : print(value ?? "ok"));
+
+// ---- links ----
+// Item text prints with links resolved (see scripts/flowLinks.ts and
+// docs/flow-cli.md): one workspace:resolveLinkTargets call per command
+// (per 500 targets). --raw skips it and prints stored text.
+const LINK_TARGET_CHUNK = 500;
+async function resolveLinkText(texts: string[]): Promise<LinkLookup | null> {
+  if (flags.raw) return null;
+  const { nodeIds, pageIds } = collectLinkTargetIds(texts);
+  const targets: LinkTargets = { nodes: [], pages: [] };
+  const ids = [...nodeIds.map((id) => ["node", id] as const), ...pageIds.map((id) => ["page", id] as const)];
+  try {
+    for (let i = 0; i < ids.length; i += LINK_TARGET_CHUNK) {
+      const chunk = ids.slice(i, i + LINK_TARGET_CHUNK);
+      const result = (await query("workspace:resolveLinkTargets", {
+        nodeIds: chunk.filter(([kind]) => kind === "node").map(([, id]) => id),
+        pageIds: chunk.filter(([kind]) => kind === "page").map(([, id]) => id),
+      })) as LinkTargets;
+      targets.nodes.push(...result.nodes);
+      targets.pages.push(...result.pages);
+    }
+  } catch (error) {
+    // E.g. a deployment from before workspace:resolveLinkTargets (production
+    // reports that only as "Server Error"). Output still works, unresolved.
+    console.error(`Couldn't resolve links (${(error as Error)?.message ?? error}); showing stored link syntax.`);
+    return null;
+  }
+  return linkLookup(targets);
+}
+const display = (text: string, lookup: LinkLookup | null) => (lookup ? renderLinks(text, lookup).displayText : text);
+// JSON keeps `text` as stored and adds displayText and links.
+const withLinks = <T extends { text: string }>(item: T, lookup: LinkLookup | null) =>
+  lookup ? { ...item, ...renderLinks(item.text, lookup) } : item;
 
 // ---- reads ----
 type PageTree = { page: PageDoc; nodes: TreeNode[]; loadWarning?: string | null };
@@ -398,7 +433,7 @@ function resolveAddParent(tree: VisibleTree, parentFlag: string | undefined, aft
   return parent;
 }
 
-async function printStrays(pageId: string, nodes: TreeNode[], walk: (parent: string | null, depth: number) => void) {
+async function printStrays(pageId: string, nodes: TreeNode[], walk: (parent: string | null, depth: number) => void, lookup: LinkLookup | null) {
   const strays = findStrayNodes(nodes);
   if (!strays.length) return;
   const parents = await resolveNodes([...new Set(strays.map((n) => n.parentNodeId!))]);
@@ -410,7 +445,7 @@ async function printStrays(pageId: string, nodes: TreeNode[], walk: (parent: str
   console.log(`\n## Stray items (${shown.length}): active, but the app can't place them under their parent`);
   for (const { node, why } of shown.sort((a, b) => a.node.position - b.node.position)) {
     const box = node.kind === "task" ? (node.taskStatus === "done" ? "[x] " : "[ ] ") : "";
-    console.log(`- ${box}${node.text}  (${node._id}; ${label[why]} ${node.parentNodeId})`);
+    console.log(`- ${box}${display(node.text, lookup)}  (${node._id}; ${label[why]} ${node.parentNodeId})`);
     walk(node._id, 1);
   }
 }
@@ -499,7 +534,21 @@ async function doctor() {
       recent: guards.recent.filter((row) => !(row.pageId && excludedPageIds.has(row.pageId)) && !(row.nodeId && excludedNodeIds.has(row.nodeId))),
     };
   }
-  if (flags.json) return print({ ...report, excludedPagesSkipped: excludedPageIds.size, guardViolations: guards });
+  const findingLists = [report.strayItems, report.notesWithTaskStatus, report.recurringWithoutDue, report.endNotAfterDue];
+  if (flags.json) {
+    const lookup = await resolveLinkText(findingLists.flat().map((f) => f.text));
+    const linked = (findings: DoctorFinding[]) => findings.map((f) => withLinks(f, lookup));
+    return print({
+      ...report,
+      strayItems: linked(report.strayItems),
+      notesWithTaskStatus: linked(report.notesWithTaskStatus),
+      recurringWithoutDue: linked(report.recurringWithoutDue),
+      endNotAfterDue: linked(report.endNotAfterDue),
+      excludedPagesSkipped: excludedPageIds.size,
+      guardViolations: guards,
+    });
+  }
+  const lookup = await resolveLinkText(findingLists.flatMap((findings) => findings.slice(0, limit)).filter((f) => f.nodeId).map((f) => f.text));
   const sections: [string, DoctorFinding[]][] = [
     ["Stray items (active, parent archived, missing or on another page)", report.strayItems],
     ["Pages under Models/Journal/Views/Scratchpads still typed default", report.untypedPages],
@@ -513,7 +562,7 @@ async function doctor() {
   for (const [title, findings] of sections) {
     console.log(`${title}: ${findings.length}`);
     for (const f of findings.slice(0, limit)) {
-      console.log(`  - "${f.pageTitle}" (${f.pageId})${f.nodeId ? ` ${f.nodeId}: ${JSON.stringify(f.text.slice(0, 60))}` : ""}${f.detail ? ` [${f.detail}]` : ""}`);
+      console.log(`  - "${f.pageTitle}" (${f.pageId})${f.nodeId ? ` ${f.nodeId}: ${JSON.stringify(display(f.text, lookup).slice(0, 80))}` : ""}${f.detail ? ` [${f.detail}]` : ""}`);
     }
     if (findings.length > limit) console.log(`  ... and ${findings.length - limit} more (--limit or --json for all)`);
   }
@@ -537,7 +586,8 @@ async function main() {
     case "tree": {
       const { excludedNodeIds, ...result } = await loadTree(rest[0]);
       if (excludedNodeIds.size) console.error(`${excludedNodeIds.size} item${excludedNodeIds.size === 1 ? "" : "s"} excluded from data dumps not shown.`);
-      if (flags.json) return print(result);
+      const lookup = await resolveLinkText(result.nodes.map((node) => node.text));
+      if (flags.json) return print({ ...result, nodes: result.nodes.map((node) => withLinks(node, lookup)) });
       if (result.loadWarning) console.error(result.loadWarning);
       console.log(`# ${result.page.title}`);
       const byParent = new Map<string | null, TreeNode[]>();
@@ -549,12 +599,12 @@ async function main() {
       const walk = (parent: string | null, depth: number) => {
         for (const node of (byParent.get(parent) ?? []).sort((a, b) => a.position - b.position)) {
           const box = node.kind === "task" ? (node.taskStatus === "done" ? "[x] " : "[ ] ") : "";
-          console.log(`${"  ".repeat(depth)}- ${box}${node.text}  (${node._id})`);
+          console.log(`${"  ".repeat(depth)}- ${box}${display(node.text, lookup)}  (${node._id})`);
           walk(node._id, depth + 1);
         }
       };
       walk(null, 0);
-      return printStrays(rest[0], result.nodes, walk);
+      return printStrays(rest[0], result.nodes, walk, lookup);
     }
     case "add-page": {
       const section = (oneOf("section", SIDEBAR_SECTIONS) ?? "Tasks") as SidebarSection;
@@ -595,7 +645,7 @@ async function main() {
       // One createNodesBatch entry, so text, kind, schedule, time zone and the
       // kind lock land in one write (createNode has no time or lock fields).
       const entry = {
-        text: text.join(" "),
+        text: toStoredLinkText(text.join(" ")),
         ...(parent !== undefined ? { parentNodeId: parent } : {}),
         ...(afterNodeId !== undefined ? { afterNodeId } : {}),
         // An explicit --task locks the kind, like the app's toggle, so AI
@@ -610,7 +660,7 @@ async function main() {
     case "add-outline": {
       const [pageId, file] = rest;
       // The app importer's parser: tasks, due markers, recurrence, kind lock.
-      const nodes = outlineBatchEntries(readFileSync(file === "-" ? 0 : file, "utf8"));
+      const nodes = outlineBatchEntries(toStoredLinkText(readFileSync(file === "-" ? 0 : file, "utf8")));
       if (!nodes.length) fail("No outline items found.");
       const tree = await loadTree(pageId);
       if (tree.page.archived) fail("That page is archived.");
@@ -666,7 +716,9 @@ async function main() {
 
       const args: Record<string, unknown> = { nodeId };
       if (flags.task || flags.note) Object.assign(args, kindChangeArgs(node, nextKind as "task" | "note"));
-      if (str("text") !== undefined) Object.assign(args, { text: str("text"), parseDraft: true });
+      // Readable links copied from output go back to the stored syntax; links
+      // that match the item's current ones keep their exact stored form.
+      if (str("text") !== undefined) Object.assign(args, { text: toStoredLinkText(str("text")!, node.text), parseDraft: true });
       if (status) args.taskStatus = status;
       if (priority) args.priority = priority === "none" ? null : priority;
       if (dueAt !== undefined) Object.assign(args, scheduleForDue(dueAt, { dueEndAt: args.dueEndAt === null ? null : node.dueEndAt }));

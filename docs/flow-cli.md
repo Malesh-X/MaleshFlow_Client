@@ -30,6 +30,7 @@ npm run -s flow -- help        # works offline, no credentials needed
 | `--yes` | Required for any write with `--prod`. |
 | `--dry-run` | Prints each Convex function and arguments a write would send, without sending. Commands that make two writes print both. |
 | `--json` | Raw JSON output for `pages`, `tree` and `doctor`. |
+| `--raw` | Print item text as stored, with link syntax instead of readable links (see Links below). |
 
 What `--dry-run` does **not** do: it doesn't validate the write against the
 backend (bad ids or values only fail on the real run), and it still needs
@@ -80,16 +81,77 @@ What this does **not** cover:
 - `undo-done` acts on a receipt and isn't checked. Receipts only come from
   `done`, which already refuses excluded items.
 - The CLI has no search command. Searching through `run` isn't filtered.
+- Links to excluded pages and items print as `[(hidden)](node:ID)`, without
+  their text (see Links in output).
 
 This is a rule the CLI keeps by convention; it isn't access control. Anyone
 with the owner key can read everything.
+
+## Links in output
+
+Commands that print item text (`tree`, its stray items, `doctor`) show node
+and page links in a readable form that keeps the id, so you can run the next
+command on it:
+
+| Stored | Printed |
+| --- | --- |
+| `[[node:ID]]`, `((ID))`, `[[ID]]` | `[Dentist appointment](node:ID)` |
+| `[[Teeth\|node:ID]]` (labeled) | `[Teeth → Dentist appointment](node:ID)` |
+| `[[node:ID?hidetags]]` | `[Dentist appointment](node:ID?hidetags)` |
+| `[[page:ID]]` | `[Health](page:ID)` |
+| link to a deleted item or page | `[(missing)](node:ID)` |
+| link to an item or page excluded from data dumps | `[(hidden)](node:ID)` (no text) |
+
+Target text is the target's current text (its own links flattened to labels)
+or page title, cut to 60 characters with `…`; an archived target ends in
+`(archived)`. `[`, `]` and `\` in it print escaped (`\[`), and `→` prints as
+`->`. Page title links (`[[Some Page]]`) and web links print as stored.
+
+Example, before and after:
+
+```
+- Call about [[node:k17a…]] and [[Topic|page:k57b…]]  (k17c…)
+- Call about [Dentist appointment](node:k17a…) and [Topic → Health](page:k57b…)  (k17c…)
+```
+
+All links in one command's output resolve in one read-only call
+(`workspace:resolveLinkTargets`; one per 500 targets). Hidden targets are
+worked out on the server with the same rule as `getDataDumpVisibility`
+(excluded page, or excluded item or ancestor), so their text never reaches the
+CLI. If that call fails (for example on a deployment without the query) the
+CLI prints stored syntax and says so on stderr.
+
+`--raw` skips this and prints text exactly as stored. With `--json`, each
+item's `text` stays the stored text and two fields are added: `displayText`
+(the printed form) and `links`, one entry per node or page link:
+`{ raw, kind: "node"|"page", id, label, options, target, missing, hidden, archived }`
+(`target` is the text or title, `null` when missing or hidden). `--json --raw`
+prints the stored data without these fields.
+
+**Writing printed links back.** `add`, `update --text` and `add-outline`
+accept the printed form and store it as link syntax, so copying a line from
+`tree` into a write keeps its links:
+
+- `update --text`: a printed link that matches one of the item's current
+  links (same kind, id, label and options) is stored exactly as before, so
+  `((ID))`, `[[ID]]` and trailing `?hidetags` options survive an edit
+  unchanged.
+- Any other printed link becomes `[[node:ID]]`, `[[Label|node:ID?options]]`
+  or `[[page:ID]]`, which the app reads the same way.
+- The text before ` → ` is the label (write a literal `→` in a label as
+  `\→`). In an unlabeled link the bracket text is display only and dropped:
+  `[anything](node:ID)` stores `[[node:ID]]`. To add a label, write
+  `[[Label|node:ID]]` or `[Label → x](node:ID)`.
+- Stored syntax passes through unchanged, so you can always write
+  `[[node:ID]]` directly. A markdown link with a `node:`/`page:` URL is
+  therefore always a link to that item, never a web link.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `pages` | List active pages as `<pageId>  <title>`. Journal pages are titled `YYYY-MM-DD`. Pages excluded from data dumps aren't listed. |
-| `tree <pageId>` | Print the page outline with node ids. Tasks show `[ ]` / `[x]`. Archived nodes are hidden. Stray items (active, but their parent is archived, missing or on another page) are listed at the end. Items excluded from data dumps (with their subtrees) are left out; an excluded page is refused. |
+| `tree <pageId>` | Print the page outline with node ids and readable links. Tasks show `[ ]` / `[x]`. Archived nodes are hidden. Stray items (active, but their parent is archived, missing or on another page) are listed at the end. Items excluded from data dumps (with their subtrees) are left out; an excluded page is refused. |
 | `add-page <title> [--section Tasks] [--type planner]` | Create a page the way the app's sidebar `+` does: the section sets the page type (Models → model, Tasks → task, Notes → note, Views → view, Journal → journal, Scratchpads → scratchpad, Templates → plain) and the server adds that type's sections. Journal pages are also added to the Latest Journal view. `--type planner` makes a planner (Tasks section only). Default section: Tasks. The server applies the same section-to-type rule when a caller (e.g. `run mutation workspace:createPage`) sends no type. Prints the page id. |
 | `rename-page <pageId> <title>` | Rename a page. |
 | `add <pageId> <text>` | Add a node at the end of the page's main section (Note, Template, Scratchpad, Thoughts/Stuff, Model, Included Pages/Nodes), or the page root on task and plain pages. Sends one `workspace:createNodesBatch` entry, so text, kind, dates, time, time zone and the kind lock land in a single write. Without `--parent`/`--after` the server picks that section (the default parent), so the dry run shows no parent. Planner pages need `--parent`. Prints the node id. |
@@ -164,7 +226,7 @@ receipt is refused.
 ### `doctor` checks
 
 `doctor` only reads (`listPages`, `getPageTree`, `resolveNodeLinks`,
-`guardViolations:list`) and never
+`resolveLinkTargets`, `guardViolations:list`) and never
 writes, so it needs no `--yes`. It skips pages and items excluded from data
 dumps (see above). It reports:
 
@@ -265,6 +327,7 @@ npm run -s flow -- run query workspace:listTasks '{}' --prod
 ## Notes
 
 - Node text supports the app's inline syntax (page links, tags); links are synced on write.
+  Readable links copied from output are converted back (see Links in output).
 - `run mutation` calls a Convex function directly and skips every check above
   (locks, loops, page types, data dump exclusions). Prefer the dedicated commands.
 - Deleting pages for good (`deletePageForever`) is irreversible. Archive instead unless the owner asks.

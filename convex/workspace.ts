@@ -13,7 +13,7 @@ import {
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isOwnerKeyValid } from "./lib/auth";
-import { listDataDumpExclusions as collectDataDumpExclusions } from "../lib/domain/dataDump";
+import { listDataDumpExclusions as collectDataDumpExclusions, isDataDumpExcluded } from "../lib/domain/dataDump";
 import {
   assertOwnerKeyGuarded,
   isAuthLocked,
@@ -4050,6 +4050,98 @@ export const resolvePageLinks = query({
           }),
         ),
     );
+  },
+});
+
+// Read-only. Resolves link targets for the Flow CLI in one call: each node's
+// text and page, each page's title, and whether the target is excluded from
+// data dumps (an excluded page, or an excluded item or ancestor). Hidden and
+// missing targets come back without text. Ids are strings so a malformed id
+// in stored text reads as missing instead of failing the call.
+const MAX_LINK_TARGETS = 500;
+const MAX_LINK_TARGET_ANCESTOR_DEPTH = 100;
+export const resolveLinkTargets = query({
+  args: {
+    ownerKey: v.string(),
+    nodeIds: v.array(v.string()),
+    pageIds: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const nodeRefs = [...new Set(args.nodeIds)];
+    const pageRefs = [...new Set(args.pageIds)];
+    if (nodeRefs.length + pageRefs.length > MAX_LINK_TARGETS) {
+      throw new ConvexError(`Too many link targets in one call (max ${MAX_LINK_TARGETS}).`);
+    }
+
+    const pageCache = new Map<string, Doc<"pages"> | null>();
+    const getPage = async (pageId: Id<"pages">) => {
+      if (!pageCache.has(pageId)) pageCache.set(pageId, await ctx.db.get(pageId));
+      return pageCache.get(pageId) ?? null;
+    };
+    const nodeCache = new Map<string, Doc<"nodes"> | null>();
+    const getNode = async (nodeId: Id<"nodes">) => {
+      if (!nodeCache.has(nodeId)) nodeCache.set(nodeId, await ctx.db.get(nodeId));
+      return nodeCache.get(nodeId) ?? null;
+    };
+    // Same rule as getDataDumpVisibility: an excluded item hides its subtree.
+    const hiddenByAncestor = new Map<string, boolean>();
+    const isExcludedNode = async (node: Doc<"nodes">): Promise<boolean> => {
+      const chain: string[] = [];
+      let current: Doc<"nodes"> | null = node;
+      let result = false;
+      for (let depth = 0; current && depth < MAX_LINK_TARGET_ANCESTOR_DEPTH; depth += 1) {
+        const known = hiddenByAncestor.get(current._id);
+        if (known !== undefined) {
+          result = known;
+          break;
+        }
+        chain.push(current._id);
+        if (isDataDumpExcluded(current)) {
+          result = true;
+          break;
+        }
+        current = current.parentNodeId ? await getNode(current.parentNodeId) : null;
+      }
+      for (const id of chain) hiddenByAncestor.set(id, result);
+      return result;
+    };
+
+    const nodes = await Promise.all(
+      nodeRefs.map(async (ref) => {
+        const nodeId = ctx.db.normalizeId("nodes", ref);
+        const node = nodeId ? await getNode(nodeId) : null;
+        const page = node ? await getPage(node.pageId) : null;
+        if (!node || !page || isPagePendingDeletion(page)) {
+          return { id: ref, found: false, hidden: false, archived: false, pageId: null, text: null };
+        }
+        if (isDataDumpExcluded(page) || (await isExcludedNode(node))) {
+          return { id: ref, found: true, hidden: true, archived: false, pageId: null, text: null };
+        }
+        return {
+          id: ref,
+          found: true,
+          hidden: false,
+          archived: node.archived || page.archived,
+          pageId: page._id as string,
+          text: node.text,
+        };
+      }),
+    );
+    const pages = await Promise.all(
+      pageRefs.map(async (ref) => {
+        const pageId = ctx.db.normalizeId("pages", ref);
+        const page = pageId ? await getPage(pageId) : null;
+        if (!page || isPagePendingDeletion(page)) {
+          return { id: ref, found: false, hidden: false, archived: false, title: null };
+        }
+        if (isDataDumpExcluded(page)) {
+          return { id: ref, found: true, hidden: true, archived: false, title: null };
+        }
+        return { id: ref, found: true, hidden: false, archived: page.archived, title: page.title };
+      }),
+    );
+    return { nodes, pages };
   },
 });
 
