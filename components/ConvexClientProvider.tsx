@@ -2,6 +2,7 @@
 
 import { ReactNode, useMemo } from "react";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
+import { StaleTabWatcher } from "@/components/appUpdate";
 
 export default function ConvexClientProvider({
   children,
@@ -18,8 +19,18 @@ export default function ConvexClientProvider({
   }, [convexUrl]);
 
   if (!client) {
-    return <>{children}</>;
+    return (
+      <>
+        {children}
+        <StaleTabWatcher client={null} />
+      </>
+    );
   }
 
-  return <ConvexProvider client={client}>{children}</ConvexProvider>;
+  return (
+    <ConvexProvider client={client}>
+      {children}
+      <StaleTabWatcher client={client} />
+    </ConvexProvider>
+  );
 }

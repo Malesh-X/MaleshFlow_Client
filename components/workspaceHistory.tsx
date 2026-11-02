@@ -12,6 +12,7 @@ import {
 } from "react";
 import { ConvexError } from "convex/values";
 import type { Id } from "@/convex/_generated/dataModel";
+import { registerUnsavedEditsProbe } from "@/components/appUpdate";
 import {
   extractTrailingDraftEdits,
   limitHistoryEntries,
@@ -465,6 +466,23 @@ export function useWorkspaceHistoryController({
 
       return session ?? null;
     },
+    [],
+  );
+
+  // Lets a stale-tab reload wait while a mounted editor holds unsaved text.
+  useEffect(
+    () =>
+      registerUnsavedEditsProbe(() => {
+        for (const [editorId, session] of draftSessionsRef.current) {
+          if (
+            editorsRef.current.has(editorId) &&
+            session.currentValue !== session.committedValue
+          ) {
+            return true;
+          }
+        }
+        return false;
+      }),
     [],
   );
 

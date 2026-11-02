@@ -164,6 +164,7 @@ import {
   useWorkspaceHistory,
   useWorkspaceHistoryController,
 } from "@/components/workspaceHistory";
+import { recoverFromConvexError } from "@/components/appUpdate";
 import { ArchiveSearchPanel } from "@/components/ArchiveSearchPanel";
 import { FindReplacePanel } from "@/components/FindReplacePanel";
 import { ImporterPanel } from "@/components/ImporterPanel";
@@ -790,6 +791,8 @@ type WorkspaceErrorBoundaryState = {
   error: Error | null;
   componentStack: string;
   resetKey: number;
+  // Checking whether an old bundle caused the error (and reloading if so).
+  isRecovering: boolean;
 };
 
 type SectionSlot =
@@ -1331,10 +1334,11 @@ class WorkspaceErrorBoundary extends Component<
     error: null,
     componentStack: "",
     resetKey: 0,
+    isRecovering: false,
   };
 
   static getDerivedStateFromError(error: Error): Partial<WorkspaceErrorBoundaryState> {
-    return { error };
+    return { error, isRecovering: true };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
@@ -1342,7 +1346,17 @@ class WorkspaceErrorBoundary extends Component<
     this.setState({
       error,
       componentStack: errorInfo.componentStack ?? "",
+      isRecovering: true,
     });
+    // A Convex server error in a tab running an old bundle (a deploy removed
+    // or changed a function it calls) reloads once instead of crashing.
+    void recoverFromConvexError(error)
+      .catch(() => false)
+      .then((reloaded) => {
+        if (!reloaded && this.state.error === error) {
+          this.setState({ isRecovering: false });
+        }
+      });
   }
 
   componentDidUpdate(prevProps: WorkspaceErrorBoundaryProps) {
@@ -1356,10 +1370,19 @@ class WorkspaceErrorBoundary extends Component<
       error: null,
       componentStack: "",
       resetKey: currentState.resetKey + 1,
+      isRecovering: false,
     }));
   };
 
   render() {
+    if (this.state.error && this.state.isRecovering) {
+      return (
+        <main className="min-h-screen bg-[var(--workspace-bg)] px-6 py-8 text-sm text-[var(--workspace-text-subtle)]">
+          Loading…
+        </main>
+      );
+    }
+
     if (this.state.error) {
       return (
         <main className="min-h-screen bg-[var(--workspace-bg)] px-6 py-8 text-[var(--workspace-text)]">
