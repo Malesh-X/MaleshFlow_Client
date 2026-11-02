@@ -19,6 +19,7 @@ import type * as importExportData from "../importExportData.js";
 import type * as legacy from "../legacy.js";
 import type * as legacyActions from "../legacyActions.js";
 import type * as lib_auth from "../lib/auth.js";
+import type * as lib_authThrottle from "../lib/authThrottle.js";
 import type * as lib_embeddingRebuild from "../lib/embeddingRebuild.js";
 import type * as lib_planner from "../lib/planner.js";
 import type * as lib_validators from "../lib/validators.js";
@@ -49,6 +50,7 @@ declare const fullApi: ApiFromModules<{
   legacy: typeof legacy;
   legacyActions: typeof legacyActions;
   "lib/auth": typeof lib_auth;
+  "lib/authThrottle": typeof lib_authThrottle;
   "lib/embeddingRebuild": typeof lib_embeddingRebuild;
   "lib/planner": typeof lib_planner;
   "lib/validators": typeof lib_validators;
