@@ -1,6 +1,7 @@
 // Pure helpers for scripts/flow.ts (no I/O, so they can be unit tested).
 // Workspace rules (page types, locks, planner items, kind toggle) come from
 // lib/domain/workspaceRules.ts, the same module the app and server use.
+import { parseImportedTextToOutlineNodes, type ImportedOutlineNode } from "../lib/domain/importer";
 import { dateInputValueToTimestamp, timestampToDateInputValue } from "../lib/domain/recurrence";
 import { getNodeMeta, pageTypeForSection, type PageType, type SidebarSection } from "../lib/domain/workspaceRules";
 
@@ -128,6 +129,52 @@ export function classifyStrayParent(nodePageId: string, parent: ParentLookup): "
   if (!parent || !parent.pageId) return "missing";
   if (parent.pageId !== nodePageId) return "otherPage";
   return parent.archived ? "archived" : "notLoaded";
+}
+
+// The id `add --parent` places a new item after: the parent's last child
+// (archived ones included, since the server appends after them too), or
+// undefined when it has none.
+export function lastChildId(nodes: TreeNode[], parentId: string) {
+  const children = nodes.filter((node) => node.parentNodeId === parentId).sort((a, b) => a.position - b.position);
+  return children.at(-1)?._id;
+}
+
+// ---- outlines ----
+
+// workspace:createNodesBatch entries for an outline, parsed with the app's
+// importer (lib/domain/importer.ts): "[ ]" / "[x]" tasks, due markers like
+// "!(2026-11-15)" or "!(2026-11-15 - 2026-11-17 | 1w)", recurrence and the
+// kind lock, the same as pasting into the app's importer. Top-level entries
+// name no parent, so the server adds them to the page's primary section.
+export function outlineBatchEntries(markdown: string) {
+  const entries: Record<string, unknown>[] = [];
+  let counter = 0;
+  const append = (node: ImportedOutlineNode, placement: { parentClientId?: string; afterClientId?: string; afterNodeId?: null }) => {
+    const clientId = `c${counter++}`;
+    entries.push({
+      clientId,
+      ...placement,
+      text: node.text,
+      kind: node.kind,
+      ...(node.taskStatus ? { taskStatus: node.taskStatus } : {}),
+      ...(node.noteCompleted ? { noteCompleted: true } : {}),
+      ...(node.dueAt !== null ? { dueAt: node.dueAt } : {}),
+      ...(node.dueEndAt !== null ? { dueEndAt: node.dueEndAt } : {}),
+      ...(node.recurrenceFrequency !== null ? { recurrenceFrequency: node.recurrenceFrequency } : {}),
+      lockKind: node.lockKind,
+    });
+    let previousChild: string | undefined;
+    for (const child of node.children) {
+      // The first child goes first under its new parent; later ones follow.
+      previousChild = append(child, { parentClientId: clientId, ...(previousChild ? { afterClientId: previousChild } : { afterNodeId: null }) });
+    }
+    return clientId;
+  };
+  let previousRoot: string | undefined;
+  for (const node of parseImportedTextToOutlineNodes(markdown)) {
+    previousRoot = append(node, previousRoot ? { afterClientId: previousRoot } : {});
+  }
+  return entries;
 }
 
 // ---- schedules ----

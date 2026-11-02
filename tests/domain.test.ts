@@ -3079,6 +3079,13 @@ test("normalizeImportedOutlineText removes imported duration markers", () => {
   );
 });
 
+test("normalizeImportedOutlineText keeps indentation, so nested outlines stay nested", () => {
+  assert.equal(
+    normalizeImportedOutlineText("- a\n  - b  (20 min)\n    - c\n\t\t- d"),
+    "- a\n  - b\n    - c\n\t\t- d",
+  );
+});
+
 test("buildDefaultMigrationLessonsDoc seeds dynalist-specific guidance", () => {
   const doc = buildDefaultMigrationLessonsDoc("dynalist");
   assert.match(doc, /Dynalist Migration Lessons/);

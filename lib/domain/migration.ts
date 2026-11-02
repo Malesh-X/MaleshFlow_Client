@@ -348,8 +348,10 @@ export function normalizeImportedOutlineText(text: string) {
     .replace(/\r\n/g, "\n")
     .split("\n")
     .map((line) => {
-      const lineWithoutDuration = line.replace(IMPORT_DURATION_PATTERN, " ").replace(/\s{2,}/g, " ").trimEnd();
-      const lineToNormalize = lineWithoutDuration;
+      // Keep the leading indent: it is the outline's nesting.
+      const indent = line.match(/^[\t ]*/)?.[0] ?? "";
+      const body = line.slice(indent.length).replace(IMPORT_DURATION_PATTERN, " ").replace(/\s{2,}/g, " ").trimEnd();
+      const lineToNormalize = `${indent}${body}`;
       const trimmed = lineToNormalize.trim();
       if (IMPORT_SEPARATOR_PATTERN.test(trimmed)) {
         return lineToNormalize.replace(trimmed, "---");

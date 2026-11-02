@@ -14,7 +14,9 @@ import {
   isPlannerCompletionItem,
   isUntypedSectionPage,
   kindChangeArgs,
+  lastChildId,
   nodeChecks,
+  outlineBatchEntries,
   noteHasTaskStatus,
   pageTypeForSection,
   parseDueDate,
@@ -256,4 +258,44 @@ test("doctor node checks", () => {
   assert.deepEqual(result.recurringWithoutDue.map((f) => f.nodeId), [recurringNoDue._id]);
   assert.deepEqual(result.endNotAfterDue.map((f) => f.nodeId), [endBeforeDue._id, endWithoutDue._id]);
   assert.equal(result.notesWithTaskStatus[0].pageTitle, "Inbox");
+});
+
+test("outlineBatchEntries uses the app importer: tasks, due markers, recurrence, kind lock, nesting", () => {
+  const entries = outlineBatchEntries(
+    ["- Plain note", "  - [ ] Open task !(2026-11-15 | 1w)", "    - Deeper", "  - Second child", "- [x] Done task", "Bare line"].join("\n"),
+  );
+  assert.equal(entries.length, 6);
+  const [note, task, deeper, second, done, bare] = entries;
+  assert.deepEqual(note, { clientId: "c0", text: "Plain note", kind: "note", lockKind: false });
+  assert.deepEqual(task, {
+    clientId: "c1",
+    parentClientId: "c0",
+    afterNodeId: null,
+    text: "Open task",
+    kind: "task",
+    taskStatus: "todo",
+    dueAt: dateInputValueToTimestamp("2026-11-15"),
+    recurrenceFrequency: "weekly",
+    lockKind: true,
+  });
+  assert.equal(deeper.parentClientId, "c1");
+  assert.deepEqual([second.parentClientId, second.afterClientId], ["c0", "c1"]);
+  assert.deepEqual([done.kind, done.taskStatus, done.afterClientId, done.parentClientId], ["task", "done", "c0", undefined]);
+  // Like the app's importer, lines without a bullet are items too.
+  assert.deepEqual([bare.text, bare.afterClientId], ["Bare line", "c4"]);
+});
+
+test("outlineBatchEntries keeps an end date only when it is after the due date", () => {
+  const [ranged, backwards] = outlineBatchEntries("- Trip !(2026-11-15 - 2026-11-17)\n- Odd !(2026-11-15 - 2026-11-14)");
+  assert.equal(ranged.dueEndAt, dateInputValueToTimestamp("2026-11-17"));
+  assert.equal(backwards.dueEndAt, undefined);
+});
+
+test("lastChildId picks the last child by position, archived ones included", () => {
+  const parent = node();
+  const first = node({ parentNodeId: parent._id, position: 10 });
+  const last = node({ parentNodeId: parent._id, position: 30, archived: true });
+  node({ parentNodeId: parent._id, position: 20 });
+  assert.equal(lastChildId([parent, last, first], parent._id), last._id);
+  assert.equal(lastChildId([parent], parent._id), undefined);
 });

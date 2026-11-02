@@ -16,8 +16,10 @@ import {
   isNodeLocked,
   isUntypedSectionPage,
   kindChangeArgs,
+  lastChildId,
   metaOf,
   nodeChecks,
+  outlineBatchEntries,
   parseDueDate,
   primarySectionSlot,
   scheduleForDue,
@@ -53,7 +55,7 @@ const COMMANDS: Record<string, Spec> = {
   },
   "add-outline": {
     args: ["pageId", "file"],
-    usage: "add-outline <pageId> <file|->          Append a markdown outline in one batch",
+    usage: "add-outline <pageId> <file|->          Append an outline in one batch (parsed like the app importer)",
   },
   update: {
     args: ["nodeId"],
@@ -318,31 +320,6 @@ async function completeLikeApp(nodeId: string) {
   return ok();
 }
 
-function parseOutline(markdown: string) {
-  const entries: Record<string, unknown>[] = [];
-  const stack: { indent: number; clientId: string }[] = [];
-  const lastChildByParent = new Map<string, string>();
-  markdown.split("\n").forEach((line, index) => {
-    // "[ ]", "[x]" and "%%" stay in the text: the server reads them (parseDraft).
-    const match = line.match(/^(\s*)[-*]\s+(.*)$/);
-    if (!match) return;
-    const indent = match[1].replace(/\t/g, "  ").length;
-    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
-    const clientId = `c${index}`;
-    const parent = stack.at(-1)?.clientId;
-    const previous = lastChildByParent.get(parent ?? "root");
-    entries.push({
-      clientId,
-      text: match[2].trim(),
-      ...(parent ? { parentClientId: parent } : {}),
-      ...(previous ? { afterClientId: previous } : {}),
-    });
-    lastChildByParent.set(parent ?? "root", clientId);
-    stack.push({ indent, clientId });
-  });
-  return entries;
-}
-
 // Where `add` puts a new item: --after's parent, --parent, or the page's main
 // section (planner pages have none, so they need --parent).
 function resolveAddParent(page: PageDoc, nodes: TreeNode[], parentFlag: string | undefined, afterFlag: string | undefined) {
@@ -526,31 +503,43 @@ async function main() {
       const placed = str("parent") !== undefined || str("after") !== undefined;
       if (!placed && primarySectionSlot(page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
       const parent = placed ? resolveAddParent(page, nodes, str("parent"), str("after")) : undefined;
-      const after = str("after");
+      const afterFlag = str("after");
+      // --parent alone appends after the parent's last child (a batch entry
+      // with a parent and no position would go first).
+      let afterNodeId: string | null | undefined;
+      if (afterFlag === "top") afterNodeId = null;
+      else if (afterFlag) afterNodeId = afterFlag;
+      else if (parent) afterNodeId = lastChildId(nodes, parent) ?? null;
       const isTask = Boolean(flags.task) || dueAt != null;
-      const nodeId = await mutation("workspace:createNode", {
-        pageId,
+      // One createNodesBatch entry, so text, kind, schedule, time zone and the
+      // kind lock land in one write (createNode has no time or lock fields).
+      const entry = {
         text: text.join(" "),
-        parseDraft: true,
         ...(parent !== undefined ? { parentNodeId: parent } : {}),
-        ...(after !== undefined ? { afterNodeId: after === "top" ? null : after } : {}),
-        ...(isTask ? { kind: "task", taskStatus: "todo" } : {}),
-        ...(dueAt != null ? { dueAt } : {}),
-      });
-      // createNode has no time arguments, so set the time in a second write.
-      if (str("time")) await mutation("workspace:updateNode", { nodeId, dueAt, ...parseTime(str("time")) });
-      return ok(nodeId);
+        ...(afterNodeId !== undefined ? { afterNodeId } : {}),
+        // An explicit --task locks the kind, like the app's toggle, so AI
+        // tagging won't flip it back to a note.
+        ...(isTask ? { kind: "task", taskStatus: "todo", lockKind: true } : {}),
+        ...(dueAt != null ? { dueAt, ...parseTime(str("time")) } : {}),
+      };
+      const created = await mutation("workspace:createNodesBatch", { pageId, nodes: [entry], parseDraft: true });
+      return ok(Array.isArray(created) ? (created[0] as { _id: string })._id : created);
     }
     case "add-outline": {
       const [pageId, file] = rest;
-      const nodes = parseOutline(readFileSync(file === "-" ? 0 : file, "utf8"));
-      if (!nodes.length) fail("No outline items found (lines must start with - or *).");
+      // The app importer's parser: tasks, due markers, recurrence, kind lock.
+      const nodes = outlineBatchEntries(readFileSync(file === "-" ? 0 : file, "utf8"));
+      if (!nodes.length) fail("No outline items found.");
       const tree = await loadTree(pageId);
       if (tree.page.archived) fail("That page is archived.");
       if (primarySectionSlot(tree.page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
       // Top-level outline items name no parent, so the server adds them at the
-      // end of the page's primary section.
-      return ok(await mutation("workspace:createNodesBatch", { pageId, nodes, parseDraft: true }));
+      // end of the page's primary section. Like the app's importer, the
+      // entries are already parsed, so no parseDraft.
+      const created = await mutation("workspace:createNodesBatch", { pageId, nodes });
+      if (dryRun || !Array.isArray(created)) return ok();
+      console.error(`Added ${created.length} item${created.length === 1 ? "" : "s"}.`);
+      return ok((created as { _id: string }[]).map((node) => node._id).join("\n"));
     }
     case "update": {
       const nodeId = rest[0];

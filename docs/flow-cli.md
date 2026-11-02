@@ -56,11 +56,11 @@ Convex login. Never print, log or commit the key. The CLI replaces it with
 | `tree <pageId>` | Print the page outline with node ids. Tasks show `[ ]` / `[x]`. Archived nodes are hidden. Stray items (active, but their parent is archived, missing or on another page) are listed at the end. |
 | `add-page <title> [--section Tasks] [--type planner]` | Create a page the way the app's sidebar `+` does: the section sets the page type (Models → model, Tasks → task, Notes → note, Views → view, Journal → journal, Scratchpads → scratchpad, Templates → plain) and the server adds that type's sections. Journal pages are also added to the Latest Journal view. `--type planner` makes a planner (Tasks section only). Default section: Tasks. The server applies the same section-to-type rule when a caller (e.g. `run mutation workspace:createPage`) sends no type. Prints the page id. |
 | `rename-page <pageId> <title>` | Rename a page. |
-| `add <pageId> <text>` | Add a node at the end of the page's main section (Note, Template, Scratchpad, Thoughts/Stuff, Model, Included Pages/Nodes), or the page root on task and plain pages. Without `--parent`/`--after` the server picks that section (`createNode`'s default parent), so the dry run shows no parent. Planner pages need `--parent`. Prints the node id. |
+| `add <pageId> <text>` | Add a node at the end of the page's main section (Note, Template, Scratchpad, Thoughts/Stuff, Model, Included Pages/Nodes), or the page root on task and plain pages. Sends one `workspace:createNodesBatch` entry, so text, kind, dates, time, time zone and the kind lock land in a single write. Without `--parent`/`--after` the server picks that section (the default parent), so the dry run shows no parent. Planner pages need `--parent`. Prints the node id. |
 | &nbsp;&nbsp;`--parent <nodeId>` | Nest under a node on the same page (appends after its last child). |
 | &nbsp;&nbsp;`--after <nodeId>` / `--after top` | Place after a specific item (and under its parent), or first. |
-| &nbsp;&nbsp;`--task`, `--due YYYY-MM-DD`, `--time HH:MM` | Make it a task, with a due date and optional time (`--due` implies `--task`; `--time` needs `--due`). |
-| `add-outline <pageId> <file\|->` | Append a markdown outline in one batch (see below) to the same place `add` would. `-` reads stdin. |
+| &nbsp;&nbsp;`--task`, `--due YYYY-MM-DD`, `--time HH:MM` | Make it a task, with a due date and optional time (`--due` implies `--task`; `--time` needs `--due`). A task made this way has its kind locked, like the app's toggle, so AI tagging won't turn it into a note. |
+| `add-outline <pageId> <file\|->` | Append an outline in one batch (see below) to the same place `add` would, parsed exactly like the app's importer. `-` reads stdin. Prints the new node ids. |
 | `update <nodeId>` | Change a node with any of the flags below. |
 | &nbsp;&nbsp;`--text "…"` | Replace the text. |
 | &nbsp;&nbsp;`--status todo\|done` | Task status (tasks only). `done` runs `done` (below), so it can't be combined with other flags; `--mode` applies. `todo` reopens. |
@@ -130,18 +130,30 @@ machine's time zone (e.g. `Pacific/Honolulu`).
 
 ### Outline format for `add-outline`
 
+`add-outline` uses the app importer's parser (`lib/domain/importer.ts`), so a
+pasted outline lands the same way it would through the app's importer:
+
 ```markdown
 - Plain note
-  - Nested note (2-space indent)
+  - Nested note (indent with 2 spaces or a tab per level)
   - [ ] Open task
     - Deeper child
 - [x] Done task
+- Pay rent !(2026-12-01 | 1m)
+- Trip !(2026-12-10 - 2026-12-14)
 ```
 
-Lines that don't start with `-` or `*` are ignored. Items are plain notes or
-tasks; set dates, priority or recurrence afterwards with `update`.
+- Every non-empty line is an item; a leading `-`, `*` or `•` is optional.
+- `[ ]` and `[x]` make open and done tasks.
+- A due marker at the end of a line, `!(YYYY-MM-DD)`, `!(start - end)` or
+  `!(date | 1w)`, sets the due date, an end date (kept only when it is after the
+  due date) and recurrence (`1d`, `2w`, `1m`, `1y`, ...). A line with a due marker
+  becomes a task. Times in markers are ignored, as in the app.
+- Tasks get their kind locked, like the app's importer.
+- Duration markers like `(20 min)` are dropped and long separator lines become
+  `---`, as in the app.
 
-`add`, `add-outline` and `update --text` send `parseDraft: true`, so the server
+`add` and `update --text` send `parseDraft: true`, so the server
 reads the text the way the app's editor does: `[ ] ` makes an open task, `[x] `
 a done task, a leading `%%` (dimmed) is kept, `---` is a separator note, and
 empty text is refused. Like the app, `update --text "[x] ..."` sets the status
