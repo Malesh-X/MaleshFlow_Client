@@ -35,3 +35,11 @@ test("completionStateMatches ignores revision but not status, dates or archive",
     false,
   );
 });
+
+test("completionStateMatches tells occurrences apart even when status and dates are the same", () => {
+  const seen = { kind: "task", taskStatus: "todo", dueAt: 100, dueEndAt: null, sourceMeta: { occurrenceIndex: 2 } };
+  assert.equal(completionStateMatches(seen, state({ occurrenceIndex: 2 })), true);
+  assert.equal(completionStateMatches(seen, state({ occurrenceIndex: 3 })), false);
+  assert.equal(completionStateMatches({ ...seen, sourceMeta: {} }, state({ occurrenceIndex: 0 })), true);
+  assert.equal(completionStateMatches({ ...seen, sourceMeta: {} }, state({ occurrenceIndex: 1 })), false);
+});

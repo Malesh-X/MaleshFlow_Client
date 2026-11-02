@@ -2,6 +2,8 @@
 // page types, locked items, planner completion items, and the task/note toggle.
 // One copy, so all three make the same decisions.
 
+import { getSourceOccurrenceIndex } from "./planner";
+
 export const SIDEBAR_SECTIONS = ["Models", "Tasks", "Notes", "Views", "Templates", "Journal", "Scratchpads"] as const;
 export type SidebarSection = (typeof SIDEBAR_SECTIONS)[number];
 export type PageType = "default" | "note" | "task" | "planner" | "model" | "journal" | "scratchpad" | "multiPage";
@@ -138,6 +140,9 @@ export type CompletionState = {
   noteCompleted: boolean;
   dueAt: number | null;
   dueEndAt: number | null;
+  // Which occurrence of a recurring item this is (sourceMeta.occurrenceIndex,
+  // 0 when unset). Optional for servers from before it was reported.
+  occurrenceIndex?: number;
   archived?: boolean;
 };
 
@@ -152,8 +157,10 @@ type CompletionSource = {
 // setNodeCompletion refuses a request made against an old revision. A text
 // edit also bumps the revision, so a caller whose view of the item still
 // matches the server's on everything completion depends on (kind, status,
-// dates) may retry with the server's revision. A completion made elsewhere
-// changes one of those fields, so it never matches and is never repeated.
+// dates, occurrence) may retry with the server's revision. A completion made
+// elsewhere changes one of those fields, so it never matches and is never
+// repeated. The occurrence counts because a recurring completion in "today"
+// mode can leave the status and due date as they were.
 export function completionStateMatches(seen: CompletionSource, current: CompletionState) {
   if (current.archived) return false;
   return (
@@ -161,7 +168,8 @@ export function completionStateMatches(seen: CompletionSource, current: Completi
     (seen.kind === "task" ? (seen.taskStatus ?? "todo") === (current.taskStatus ?? "todo") : true) &&
     (getNodeMeta(seen).noteCompleted === true) === current.noteCompleted &&
     (seen.dueAt ?? null) === current.dueAt &&
-    (seen.dueEndAt ?? null) === current.dueEndAt
+    (seen.dueEndAt ?? null) === current.dueEndAt &&
+    (current.occurrenceIndex === undefined || getSourceOccurrenceIndex(seen.sourceMeta) === current.occurrenceIndex)
   );
 }
 

@@ -109,7 +109,7 @@ import {
 } from "./lib/guards";
 import { changeForUpdate } from "./lib/guardRules";
 import { isValidTimeZone } from "../lib/domain/timeZone";
-import { withNextSourceOccurrence } from "../lib/domain/planner";
+import { getSourceOccurrenceIndex, withNextSourceOccurrence } from "../lib/domain/planner";
 import {
   getNodeMeta,
   isNodeCompleted,
@@ -5118,6 +5118,7 @@ function completionSnapshot(node: Doc<"nodes">) {
     noteCompleted: getNodeSourceMeta(node).noteCompleted === true,
     dueAt: node.dueAt ?? null,
     dueEndAt: node.dueEndAt ?? null,
+    occurrenceIndex: getSourceOccurrenceIndex(node.sourceMeta),
     archived: node.archived,
   };
 }

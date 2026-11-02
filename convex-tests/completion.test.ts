@@ -116,6 +116,41 @@ describe("intent and revision", () => {
   });
 });
 
+// The app's retry rule (WorkspaceApp setNodeCompletionChecked): a stale
+// answer is retried once with the server's revision when the item still
+// looks the way the caller saw it.
+async function appComplete(
+  t: Awaited<ReturnType<typeof setup>>["t"],
+  seen: Doc<"nodes">,
+  completionMode: "dueDate" | "today",
+) {
+  const args = { ownerKey, nodeId: seen._id, intent: "complete" as const, completionMode, expectedRevision: seen.revision ?? 0 };
+  const first = await t.mutation(api.workspace.setNodeCompletion, args);
+  if (first.status !== "stale" || !completionStateMatches(seen, first.before)) return first;
+  return t.mutation(api.workspace.setNodeCompletion, { ...args, expectedRevision: first.before.revision });
+}
+
+describe("double completion", () => {
+  for (const completionMode of ["dueDate", "today"] as const) {
+    test(`two app requests against the same revision complete the occurrence once (${completionMode})`, async () => {
+      const { t, get, page, add } = await setup();
+      const pageId = await page("Plain", "Notes", "note");
+      // Due Nov 3, daily: in "today" mode on Nov 2 the due date stays Nov 3.
+      const task = await add(pageId, "Daily", { kind: "task", taskStatus: "todo", dueAt: day(3), recurrenceFrequency: "daily" });
+      const seen = await get(task);
+      expect((await appComplete(t, seen, completionMode)).status).toBe("applied");
+      const afterFirst = await get(task);
+      const second = await appComplete(t, seen, completionMode);
+      expect(second.status).not.toBe("applied");
+      // The current state comes back, and nothing changed.
+      expect(second.after?.revision).toBe(afterFirst.revision);
+      const afterSecond = await get(task);
+      expect((afterSecond.sourceMeta as Record<string, unknown>).occurrenceIndex).toBe(1);
+      expect(afterSecond.revision).toBe(afterFirst.revision);
+    });
+  }
+});
+
 describe("app callers", () => {
   test("the page tree the app loads carries each item's revision", async () => {
     const { t, get, page, add } = await setup();
