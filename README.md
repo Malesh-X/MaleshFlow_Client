@@ -1,3 +1,7 @@
+# MaleshFlow
+
+**Agents:** to read or edit workspace data (pages, notes, tasks) from the terminal, use the Flow CLI. See [docs/flow-cli.md](docs/flow-cli.md).
+
 # Welcome to your Convex + Vercel app
 
 This is a [Convex](https://convex.dev/) project demonstrating how to use Convex with Vercel.
