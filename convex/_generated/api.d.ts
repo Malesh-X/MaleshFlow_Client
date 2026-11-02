@@ -26,6 +26,7 @@ import type * as lib_guardRegistry from "../lib/guardRegistry.js";
 import type * as lib_guardRules from "../lib/guardRules.js";
 import type * as lib_guards from "../lib/guards.js";
 import type * as lib_planner from "../lib/planner.js";
+import type * as lib_undoReceipts from "../lib/undoReceipts.js";
 import type * as lib_validators from "../lib/validators.js";
 import type * as lib_workspace from "../lib/workspace.js";
 import type * as lib_workspaceSettings from "../lib/workspaceSettings.js";
@@ -62,6 +63,7 @@ declare const fullApi: ApiFromModules<{
   "lib/guardRules": typeof lib_guardRules;
   "lib/guards": typeof lib_guards;
   "lib/planner": typeof lib_planner;
+  "lib/undoReceipts": typeof lib_undoReceipts;
   "lib/validators": typeof lib_validators;
   "lib/workspace": typeof lib_workspace;
   "lib/workspaceSettings": typeof lib_workspaceSettings;
