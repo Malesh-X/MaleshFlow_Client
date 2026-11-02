@@ -512,14 +512,19 @@ export const applyTaskMetadata = internalMutation({
     }
     const separatorNote = isSeparatorLineText(node.text);
     const kind = separatorNote ? "note" : args.kind;
+    const taskStatus = kind === "task" ? (args.taskStatus ?? node.taskStatus ?? "todo") : null;
+    const priority = separatorNote ? null : (args.priority ?? node.priority);
+    // Skip writes that change nothing: they would bump the item's revision
+    // right after every edit and completion, which makes undo receipts and
+    // completion requests look stale.
+    if (node.kind === kind && (node.taskStatus ?? null) === taskStatus && (node.priority ?? null) === (priority ?? null)) {
+      return;
+    }
 
     await ctx.db.patch(args.nodeId, {
       kind,
-      taskStatus:
-        kind === "task"
-          ? (args.taskStatus ?? node.taskStatus ?? "todo")
-          : null,
-      priority: separatorNote ? null : (args.priority ?? node.priority),
+      taskStatus,
+      priority,
       updatedAt: Date.now(),
     });
   },

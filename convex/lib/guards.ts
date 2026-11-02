@@ -26,7 +26,7 @@ import {
   type NodeChange,
 } from "./guardRules";
 
-type GuardState = { mutation: string; mode: GuardMode; recorded: number };
+type GuardState = { mutation: string; mode: GuardMode; recorded: number; writeScopes: Set<Map<string, number | null>> };
 const guardStates = new WeakMap<object, GuardState>();
 // Keeps one runaway batch from writing thousands of log rows.
 const MAX_RECORDS_PER_CALL = 50;
@@ -35,12 +35,14 @@ const MAX_ANCESTOR_STEPS = 500;
 type Db = MutationCtx["db"];
 
 // Wraps a database writer so node writes carry a revision counter. Phase 3 and
-// 4 use it to detect stale requests.
-export function withNodeRevisions(db: Db): Db {
+// 4 use it to detect stale requests. `onWrite` hears about each node write
+// with the node's revision just before it (null for an insert).
+export function withNodeRevisions(db: Db, onWrite?: (nodeId: string, revisionBefore: number | null) => void): Db {
   const isNodeId = (table: unknown, id: unknown) =>
     table === "nodes" || (table === undefined && typeof id === "string" && db.normalizeId("nodes", id) !== null);
   const bump = async (id: unknown, value: Record<string, unknown>) => {
     const current = (await db.get(id as Id<"nodes">)) as { revision?: number } | null;
+    if (current) onWrite?.(id as string, current.revision ?? 0);
     return { ...value, revision: (current?.revision ?? 0) + 1 };
   };
   const rewrite =
@@ -52,8 +54,11 @@ export function withNodeRevisions(db: Db): Db {
       const call = db[method] as (...callArgs: unknown[]) => Promise<void>;
       return tableFirst ? call.call(db, table, id, nextValue) : call.call(db, id, nextValue);
     };
-  const insert = async (table: string, value: Record<string, unknown>) =>
-    (db.insert as (t: string, v: unknown) => Promise<unknown>).call(db, table, table === "nodes" ? { revision: 1, ...value } : value);
+  const insert = async (table: string, value: Record<string, unknown>) => {
+    const id = await (db.insert as (t: string, v: unknown) => Promise<unknown>).call(db, table, table === "nodes" ? { revision: 1, ...value } : value);
+    if (table === "nodes") onWrite?.(id as string, null);
+    return id;
+  };
 
   return new Proxy(db, {
     get(target, prop) {
@@ -67,15 +72,29 @@ export function withNodeRevisions(db: Db): Db {
 }
 
 export function withGuards(ctx: MutationCtx, mutation: string, options: { mode?: GuardMode } = {}): MutationCtx {
-  const wrapped = { ...ctx, db: withNodeRevisions(ctx.db) } as MutationCtx;
-  guardStates.set(wrapped, { mutation, mode: options.mode ?? GUARD_MODE, recorded: 0 });
+  const writeScopes = new Set<Map<string, number | null>>();
+  const noteWrite = (nodeId: string, revisionBefore: number | null) => {
+    for (const scope of writeScopes) if (!scope.has(nodeId)) scope.set(nodeId, revisionBefore);
+  };
+  const wrapped = { ...ctx, db: withNodeRevisions(ctx.db, noteWrite) } as MutationCtx;
+  guardStates.set(wrapped, { mutation, mode: options.mode ?? GUARD_MODE, recorded: 0, writeScopes });
   return wrapped;
+}
+
+// Records the nodes written from now until stop(), each with its revision
+// before the first of those writes (null for nodes inserted). Undo receipts
+// use it to know what an action touched and where it started.
+export function trackNodeWrites(ctx: MutationCtx) {
+  const writes = new Map<string, number | null>();
+  const { writeScopes } = stateOf(ctx);
+  writeScopes.add(writes);
+  return { writes: writes as ReadonlyMap<string, number | null>, stop: () => writeScopes.delete(writes) };
 }
 
 function stateOf(ctx: MutationCtx): GuardState {
   let state = guardStates.get(ctx);
   if (!state) {
-    state = { mutation: "unknown", mode: GUARD_MODE, recorded: 0 };
+    state = { mutation: "unknown", mode: GUARD_MODE, recorded: 0, writeScopes: new Set() };
     guardStates.set(ctx, state);
   }
   return state;

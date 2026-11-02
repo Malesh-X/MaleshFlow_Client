@@ -4,6 +4,7 @@ import { JSDOM } from "jsdom";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ConvexError } from "convex/values";
 import type { Id } from "../convex/_generated/dataModel";
 import {
   WorkspaceHistoryProvider,
@@ -286,10 +287,8 @@ function HistoryHarness() {
     moveNode: async () => undefined,
     setNodeTreeArchived: async () => undefined,
     setNodeTreesArchivedBatch: async () => undefined,
-    setNodeCompletion: async () => null,
-    getNodeRevision: () => 0,
-    forceArchiveTaskPageItem: async () => null,
-    undoCompletePlannerTask: async () => undefined,
+    undoCompletion: async () => null,
+    redoCompletion: async () => null,
     draftCheckpointDelayMs: 20,
   });
 
@@ -367,6 +366,83 @@ test("live typing undo and redo works inside a node editor", { concurrency: fals
   await user.keyboard("{Control>}{Shift>}z{/Shift}{/Control}");
   assert.equal(nodeInput.value, "Alpha plus");
 
+  cleanup();
+  dom.window.close();
+});
+
+// A completion undo the server refuses: the message is shown, the step is
+// dropped, and older steps stay available. Other failures keep the step.
+function CompletionHarness({ undoCompletion }: { undoCompletion: () => Promise<unknown> }) {
+  const [message, setMessage] = useState("");
+  const history = useWorkspaceHistoryController({
+    ownerKey: "owner",
+    selectedPageId: PAGE_ONE,
+    setSelectedPageId: () => undefined,
+    renamePage: async () => undefined,
+    updateNode: async () => undefined,
+    moveNode: async () => undefined,
+    setNodeTreeArchived: async () => undefined,
+    setNodeTreesArchivedBatch: async () => undefined,
+    undoCompletion,
+    redoCompletion: async () => null,
+    onHistoryMessage: setMessage,
+  });
+  const pushed = useRef(false);
+  useEffect(() => {
+    if (pushed.current) return;
+    pushed.current = true;
+    history.pushUndoEntry({ type: "archive_node_tree", pageId: PAGE_ONE, nodeId: NODE_ONE, focusAfterUndoId: null, focusAfterRedoId: null });
+    history.pushUndoEntry({ type: "completion_receipt", pageId: PAGE_ONE, receiptIds: ["r1"], focusEditorId: null });
+  }, [history]);
+  return (
+    <div>
+      <div data-testid="message">{message}</div>
+      <button data-testid="undo" onClick={() => void history.undo()}>
+        Undo
+      </button>
+      <div data-testid="counts">{`${history.canUndo}/${history.canRedo}`}</div>
+    </div>
+  );
+}
+
+test("a refused completion undo shows the server's message and drops that step", { concurrency: false }, async () => {
+  const dom = installDom();
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls: number[] = [];
+  const view = render(
+    <CompletionHarness
+      undoCompletion={async () => {
+        calls.push(1);
+        throw new ConvexError({ code: "undoRefused", message: `Can't undo this completion: "Task" was changed. Nothing was undone.` });
+      }}
+    />,
+  );
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
+  await user.click(view.getByTestId("undo"));
+  await waitFor(() => assert.match(view.getByTestId("message").textContent ?? "", /"Task" was changed/));
+  // The refused step is gone; the older archive step is still there to undo.
+  assert.equal(view.getByTestId("counts").textContent, "true/false");
+  await user.click(view.getByTestId("undo"));
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "false/true"));
+  assert.equal(calls.length, 1);
+  cleanup();
+  dom.window.close();
+});
+
+test("a failed completion undo keeps the step and says so", { concurrency: false }, async () => {
+  const dom = installDom();
+  const user = userEvent.setup({ document: dom.window.document });
+  const view = render(
+    <CompletionHarness
+      undoCompletion={async () => {
+        throw new Error("Network down");
+      }}
+    />,
+  );
+  await waitFor(() => assert.equal(view.getByTestId("counts").textContent, "true/false"));
+  await user.click(view.getByTestId("undo"));
+  await waitFor(() => assert.equal(view.getByTestId("message").textContent, "Couldn't undo: Network down"));
+  assert.equal(view.getByTestId("counts").textContent, "true/false");
   cleanup();
   dom.window.close();
 });

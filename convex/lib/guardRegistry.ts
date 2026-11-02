@@ -28,10 +28,14 @@ export const GUARDED_MUTATIONS: Record<string, GuardedEntry> = {
   "workspace:archiveNode": { checks: "node archivable / unarchivable" },
   "workspace:setNodeTreeArchived": { checks: "node archivable / unarchivable" },
   "workspace:setNodeTreesArchivedBatch": { checks: "each node archivable / unarchivable" },
-  "workspace:forceArchiveTaskPageItem": { checks: "node archivable" },
+  "workspace:forceArchiveTaskPageItem": { checks: "node archivable", via: ["forceArchiveCore"] },
   "workspace:deleteNode": { checks: "node deletable" },
   "workspace:completeTaskPageTask": { checks: "node status editable (legacy adapter for old tabs)" },
-  "workspace:setNodeCompletion": { checks: "node status editable; planner page writable for previews" },
+  "workspace:setNodeCompletion": { checks: "node status editable; planner page writable for previews", via: ["runNodeCompletion"] },
+  "workspace:redoCompletion": {
+    checks: "re-runs the completion (node status editable, or archivable for force archive) after its own receipt checks",
+    via: ["runNodeCompletion", "forceArchiveCore"],
+  },
   "workspace:applyFindAndReplaceBatch": { checks: "each replaced node editable" },
   "workspace:renamePage": { checks: "page writable" },
   "workspace:setNodeChildrenLinkAutocompleteHidden": { checks: "node editable" },
@@ -87,7 +91,10 @@ export const EXEMPT_MUTATIONS: Record<string, string> = {
   "workspace:setPagePinnedInAllSidebar": "Sidebar display setting; no tree, schedule or status change.",
   "workspace:mergePinnedPagesInAllSidebar": "Sidebar display setting; no tree, schedule or status change.",
   "workspace:setSidebarFavorite": "Sidebar favorites table only.",
-  "planner:undoCompletePlannerTask": "Undo restores recorded before-states; Phase 4 adds conflict checks to receipts.",
+  "planner:undoCompletePlannerTask":
+    "Legacy undo adapter for old tabs. Receipts with a receiptId go through the checked undo (see workspace:undoCompletion); older ones restore recorded before-states as before.",
+  "workspace:undoCompletion":
+    "Undo has to restore what a completion archived or changed, including archived items and locked planner days that the guards refuse to edit. Instead it runs its own checks (convex/lib/undoReceipts.ts): every touched item must be at the revision the completion left and every subtree it deletes or restores must have the same members, or it refuses and changes nothing.",
   "chatData:ensureChatThread": "Chat tables only.",
   "chatData:ensureWorkspaceKnowledgeThread": "Chat tables only.",
   "calendar:ensureTaskCalendarFeed": "Calendar feed table only.",

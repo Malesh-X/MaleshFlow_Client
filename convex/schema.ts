@@ -417,4 +417,32 @@ export default defineSchema({
     detail: v.string(),
     createdAt: v.number(),
   }).index("by_createdAt", ["createdAt"]),
+  // Stored undo receipts for completions (Phase 4). A receipt holds what the
+  // action changed (before-states, created and archived subtrees) plus the
+  // checks undo and redo run first: the revision each touched item should be
+  // at, and the members of each subtree they would delete or restore.
+  // See convex/lib/undoReceipts.ts.
+  undoReceipts: defineTable({
+    action: v.union(v.literal("completion"), v.literal("forceArchive")),
+    targetNodeId: v.id("nodes"),
+    completionMode: v.union(v.literal("dueDate"), v.literal("today")),
+    plannerPageId: v.optional(v.id("pages")),
+    // "applied": undo is next; "undone": redo is next.
+    state: v.union(v.literal("applied"), v.literal("undone")),
+    // PlannerCompletionReceipt (lib/domain/planner.ts).
+    receipt: v.any(),
+    // Revisions the current state left (checked before undo or redo), and the
+    // revisions just before the last transition (used to chain receipts).
+    expect: v.array(v.object({ nodeId: v.id("nodes"), revision: v.number(), text: v.string() })),
+    prev: v.array(v.object({ nodeId: v.id("nodes"), revision: v.number() })),
+    subtrees: v.array(
+      v.object({
+        role: v.union(v.literal("delete"), v.literal("restore")),
+        rootNodeId: v.id("nodes"),
+        nodeIds: v.array(v.id("nodes")),
+      }),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_state_and_updatedAt", ["state", "updatedAt"]),
 });

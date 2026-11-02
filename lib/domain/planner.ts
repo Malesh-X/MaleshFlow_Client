@@ -456,6 +456,9 @@ export type PlannerCompletionReceipt = {
   deletedFavorites: PlannerCompletionDeletedFavorite[];
   archivedRootNodeId: string | null;
   pastWeeksCloneRootNodeId: string | null;
+  // Id of the stored copy of this receipt (convex/lib/undoReceipts.ts), on
+  // receipts returned since Phase 4.
+  receiptId?: string;
 };
 
 export function plannerCompletionReceiptHasEffects(

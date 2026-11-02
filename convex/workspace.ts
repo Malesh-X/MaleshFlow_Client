@@ -121,6 +121,7 @@ import {
   primarySectionSlot,
 } from "../lib/domain/workspaceRules";
 import { readWorkspaceSettings, workspaceTimeZoneFor, writeWorkspaceSettings } from "./lib/workspaceSettings";
+import { redoStoredReceipt, runWithReceipt, undoStoredReceipt } from "./lib/undoReceipts";
 
 function getTimestamp() {
   return Date.now();
@@ -5562,9 +5563,32 @@ function completionSnapshot(node: Doc<"nodes">) {
   };
 }
 
-// One server path for the checkbox, `flow done` and `update --status done`
-// (Phase 3, change 2). The caller says what it wants ("complete" or "reopen")
-// and which revision of the item it saw:
+// A receipt that records one item's before-state, for completions that only
+// patch that item (notes, plain tasks, recurring roll-forward).
+function singleItemReceipt(node: Doc<"nodes">) {
+  const receipt = createPlannerCompletionReceipt();
+  receipt.plannerNodes.push({
+    nodeId: node._id as string,
+    taskStatus: node.taskStatus ?? null,
+    dueAt: node.dueAt ?? null,
+    dueEndAt: node.dueEndAt ?? null,
+    sourceMeta: node.sourceMeta ?? null,
+  });
+  return receipt;
+}
+
+type CompletionRoute = "none" | "planner" | "plannerPreview" | "taskPage" | "recurring" | "task" | "note";
+type CompletionArgs = {
+  nodeId: Id<"nodes">;
+  intent: "complete" | "reopen";
+  completionMode: RecurringCompletionMode;
+  expectedRevision: number;
+  plannerPageId?: Id<"pages">;
+};
+
+// The completion routing behind setNodeCompletion and redoCompletion. The
+// caller says what it wants ("complete" or "reopen") and which revision of the
+// item it saw:
 // - an item already in that state is left alone (so complete never reopens);
 // - a stale revision changes nothing and returns the current state;
 // - routing matches the app: planner items -> Past Weeks flow, task pages
@@ -5572,6 +5596,121 @@ function completionSnapshot(node: Doc<"nodes">) {
 //   completed flag, plain tasks get their status.
 // `plannerPageId` is set when a source task is completed from a planner's
 // preview: the planner's copy of it is completed instead.
+// Every applied route returns a receipt of what it changed (for undo).
+async function runNodeCompletion(ctx: MutationCtx, args: CompletionArgs) {
+  const node = await ctx.db.get(args.nodeId);
+  if (!node) {
+    throw new ConvexError("Item not found.");
+  }
+  await assertNodeEditable(ctx, node, "status");
+  const result = (
+    status: "applied" | "noop" | "stale",
+    route: CompletionRoute,
+    after: Doc<"nodes"> | null,
+    receipt: PlannerCompletionReceipt | null = null,
+  ) => ({ status, route, receipt, before: completionSnapshot(node), after: after ? completionSnapshot(after) : null });
+
+  if ((node.revision ?? 0) !== args.expectedRevision) {
+    return result("stale", "none", node);
+  }
+  if (node.archived) {
+    return result("noop", "none", node);
+  }
+
+  const completed = isNodeCompleted(node);
+  if ((args.intent === "complete") === completed) {
+    return result("noop", "none", node);
+  }
+
+  // A source task shown in a planner preview: complete the planner's copy of
+  // it. With no copy in that planner, fall through to the normal routing.
+  if (args.plannerPageId && args.plannerPageId !== node.pageId && args.intent === "complete" && node.kind === "task") {
+    await assertPageWritable(ctx, args.plannerPageId);
+    const preview = await completePlannerSourceTaskInstance(ctx, {
+      plannerPageId: args.plannerPageId,
+      sourceTaskNodeId: node._id,
+      completionMode: args.completionMode,
+    });
+    if (preview.completedPlannerNodeId) {
+      return result("applied", "plannerPreview", await ctx.db.get(node._id), preview.receipt ?? null);
+    }
+  }
+
+  const page = await ctx.db.get(node.pageId);
+  const ancestors = await loadAncestorMap(ctx.db, node);
+  const now = getTimestamp();
+
+  if (args.intent === "complete" && isPlannerCompletionItem(node, (id) => ancestors.get(id))) {
+    const receipt = await completePlannerLinkedTask(ctx, {
+      plannerNodeId: node._id,
+      completionMode: args.completionMode,
+    });
+    return result("applied", "planner", await ctx.db.get(node._id), receipt);
+  }
+
+  if (node.kind === "task" && isTaskPageWithDoneArchive(page)) {
+    // Toggles done <-> todo; the intent check above guarantees direction.
+    const taskPage = await completeTaskPageTaskCore(ctx, node._id, args.completionMode);
+    return result("applied", "taskPage", await ctx.db.get(node._id), taskPage.receipt);
+  }
+
+  const receipt = singleItemReceipt(node);
+  if (node.kind === "note") {
+    await ctx.db.patch(node._id, {
+      sourceMeta: { ...getNodeSourceMeta(node), noteCompleted: args.intent === "complete", taskKindLocked: true },
+      updatedAt: now,
+    });
+    return result("applied", "note", await ctx.db.get(node._id), receipt);
+  }
+
+  const frequency = parseRecurrenceFrequency(getNodeSourceMeta(node).recurrenceFrequency);
+  if (args.intent === "complete" && frequency && node.dueAt) {
+    const nextRange = advanceRecurringDueDateRange({
+      dueAt: node.dueAt,
+      dueEndAt: node.dueEndAt ?? null,
+      frequency,
+      mode: args.completionMode,
+      timeZone: await workspaceTimeZoneFor(ctx.db, node),
+    });
+    await ctx.db.patch(node._id, {
+      taskStatus: "todo",
+      dueAt: nextRange.dueAt,
+      dueEndAt: nextRange.dueEndAt,
+      sourceMeta: { ...withNextSourceOccurrence(node.sourceMeta), taskKindLocked: true },
+      updatedAt: now,
+    });
+    const refreshed = (await ctx.db.get(node._id))!;
+    await syncLinksForNode(ctx.db, refreshed);
+    await enqueueNodeAiWork(ctx, refreshed._id);
+    if (shouldAppendRecurringPlannerSidebarTaskOccurrence(node, refreshed)) {
+      const appendedId = await appendPlannerSidebarSourceTaskToMatchingDay(ctx, { ...refreshed, dueEndAt: refreshed.dueEndAt ?? null });
+      if (appendedId) {
+        receipt.appendedPlannerNodeIds.push(appendedId as string);
+      }
+    }
+    await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
+    return result("applied", "recurring", refreshed, receipt);
+  }
+
+  await ctx.db.patch(node._id, {
+    taskStatus: args.intent === "complete" ? "done" : "todo",
+    sourceMeta: { ...getNodeSourceMeta(node), taskKindLocked: true },
+    updatedAt: now,
+  });
+  const refreshed = (await ctx.db.get(node._id))!;
+  await enqueueNodeAiWork(ctx, refreshed._id);
+  await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
+  return result("applied", "task", refreshed, receipt);
+}
+
+// Routes whose inline receipt old tabs (from before Phase 4) store for undo.
+// Old tabs undo the other routes by restoring values with updateNode, so they
+// keep getting no inline receipt for those.
+const INLINE_RECEIPT_ROUTES = new Set<CompletionRoute>(["planner", "plannerPreview", "taskPage"]);
+
+// One server path for the checkbox, `flow done` and `update --status done`
+// (Phase 3, change 2; routing in runNodeCompletion). An applied completion
+// returns `receiptId`, a stored receipt for workspace:undoCompletion.
 export const setNodeCompletion = mutation({
   args: {
     ownerKey: v.string(),
@@ -5584,112 +5723,53 @@ export const setNodeCompletion = mutation({
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:setNodeCompletion");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    const node = await ctx.db.get(args.nodeId);
-    if (!node) {
-      throw new ConvexError("Item not found.");
-    }
-    await assertNodeEditable(ctx, node, "status");
-    const result = (
-      status: "applied" | "noop" | "stale",
-      route: "none" | "planner" | "plannerPreview" | "taskPage" | "recurring" | "task" | "note",
-      after: Doc<"nodes"> | null,
-      receipt: ReturnType<typeof createPlannerCompletionReceipt> | null = null,
-    ) => ({ status, route, receipt, before: completionSnapshot(node), after: after ? completionSnapshot(after) : null });
-
-    if ((node.revision ?? 0) !== args.expectedRevision) {
-      return result("stale", "none", node);
-    }
-    if (node.archived) {
-      return result("noop", "none", node);
-    }
-
-    const completed = isNodeCompleted(node);
-    if ((args.intent === "complete") === completed) {
-      return result("noop", "none", node);
-    }
-
-    // A source task shown in a planner preview: complete the planner's copy of
-    // it. With no copy in that planner, fall through to the normal routing.
-    if (args.plannerPageId && args.plannerPageId !== node.pageId && args.intent === "complete" && node.kind === "task") {
-      await assertPageWritable(ctx, args.plannerPageId);
-      const preview = await completePlannerSourceTaskInstance(ctx, {
-        plannerPageId: args.plannerPageId,
-        sourceTaskNodeId: node._id,
+    const result = await runWithReceipt(
+      ctx,
+      {
+        action: "completion",
+        targetNodeId: args.nodeId,
         completionMode: args.completionMode,
-      });
-      if (preview.completedPlannerNodeId) {
-        return result("applied", "plannerPreview", await ctx.db.get(node._id), preview.receipt ?? null);
-      }
-    }
-
-    const page = await ctx.db.get(node.pageId);
-    const ancestors = await loadAncestorMap(ctx.db, node);
-    const now = getTimestamp();
-
-    if (args.intent === "complete" && isPlannerCompletionItem(node, (id) => ancestors.get(id))) {
-      const receipt = await completePlannerLinkedTask(ctx, {
-        plannerNodeId: node._id,
-        completionMode: args.completionMode,
-      });
-      return result("applied", "planner", await ctx.db.get(node._id), receipt);
-    }
-
-    if (node.kind === "task" && isTaskPageWithDoneArchive(page)) {
-      // Toggles done <-> todo; the intent check above guarantees direction.
-      const taskPage = await completeTaskPageTaskCore(ctx, node._id, args.completionMode);
-      return result("applied", "taskPage", await ctx.db.get(node._id), taskPage.receipt);
-    }
-
-    if (node.kind === "note") {
-      await ctx.db.patch(node._id, {
-        sourceMeta: { ...getNodeSourceMeta(node), noteCompleted: args.intent === "complete", taskKindLocked: true },
-        updatedAt: now,
-      });
-      return result("applied", "note", await ctx.db.get(node._id));
-    }
-
-    const frequency = parseRecurrenceFrequency(getNodeSourceMeta(node).recurrenceFrequency);
-    if (args.intent === "complete" && frequency && node.dueAt) {
-      const nextRange = advanceRecurringDueDateRange({
-        dueAt: node.dueAt,
-        dueEndAt: node.dueEndAt ?? null,
-        frequency,
-        mode: args.completionMode,
-        timeZone: await workspaceTimeZoneFor(ctx.db, node),
-      });
-      await ctx.db.patch(node._id, {
-        taskStatus: "todo",
-        dueAt: nextRange.dueAt,
-        dueEndAt: nextRange.dueEndAt,
-        sourceMeta: { ...withNextSourceOccurrence(node.sourceMeta), taskKindLocked: true },
-        updatedAt: now,
-      });
-      const refreshed = (await ctx.db.get(node._id))!;
-      await syncLinksForNode(ctx.db, refreshed);
-      await enqueueNodeAiWork(ctx, refreshed._id);
-      if (shouldAppendRecurringPlannerSidebarTaskOccurrence(node, refreshed)) {
-        await appendPlannerSidebarSourceTaskToMatchingDay(ctx, { ...refreshed, dueEndAt: refreshed.dueEndAt ?? null });
-      }
-      await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
-      return result("applied", "recurring", refreshed);
-    }
-
-    await ctx.db.patch(node._id, {
-      taskStatus: args.intent === "complete" ? "done" : "todo",
-      sourceMeta: { ...getNodeSourceMeta(node), taskKindLocked: true },
-      updatedAt: now,
-    });
-    const refreshed = (await ctx.db.get(node._id))!;
-    await enqueueNodeAiWork(ctx, refreshed._id);
-    await enqueuePageRootEmbeddingRefresh(ctx, refreshed.pageId);
-    return result("applied", "task", refreshed);
+        ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
+      },
+      () =>
+        runNodeCompletion(ctx, {
+          nodeId: args.nodeId,
+          intent: args.intent,
+          completionMode: args.completionMode,
+          expectedRevision: args.expectedRevision,
+          ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
+        }),
+    );
+    const inline = result.receipt && result.receiptId && INLINE_RECEIPT_ROUTES.has(result.route);
+    return { ...result, receipt: inline ? { ...result.receipt!, receiptId: result.receiptId as string } : null };
   },
 });
 
 // Archives a task-page item's subtree to Done immediately, without requiring
-// the item or its children to be marked done first. Returns the same
-// completion receipt shape as completeTaskPageTask so the client can offer
-// undo.
+// the item or its children to be marked done first.
+async function forceArchiveCore(ctx: MutationCtx, nodeId: Id<"nodes">) {
+  await assertNodeEditable(ctx, nodeId, "archive");
+
+  const node = await ctx.db.get(nodeId);
+  if (!node || node.archived) {
+    throw new Error("Item not found.");
+  }
+
+  const page = await ctx.db.get(node.pageId);
+  if (!page || page.archived || !isTaskSourcePage(page)) {
+    throw new Error("Force archive works on task pages.");
+  }
+  if (!isTaskPageDoneArchiveEnabled(page)) {
+    throw new Error("Enable done archiving on this page first.");
+  }
+
+  const receipt = createPlannerCompletionReceipt();
+  await archiveTaskPageSubtreeToDone(ctx, node, getTimestamp(), receipt);
+  return { receipt };
+}
+
+// Returns the same receipt shape as a completion (inline, for old tabs, and
+// stored as `receiptId`) so the app can offer undo.
 export const forceArchiveTaskPageItem = mutation({
   args: {
     ownerKey: v.string(),
@@ -5698,26 +5778,76 @@ export const forceArchiveTaskPageItem = mutation({
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:forceArchiveTaskPageItem");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    await assertNodeEditable(ctx, args.nodeId, "archive");
-
-    const node = await ctx.db.get(args.nodeId);
-    if (!node || node.archived) {
-      throw new Error("Item not found.");
-    }
-
-    const page = await ctx.db.get(node.pageId);
-    if (!page || page.archived || !isTaskSourcePage(page)) {
-      throw new Error("Force archive works on task pages.");
-    }
-    if (!isTaskPageDoneArchiveEnabled(page)) {
-      throw new Error("Enable done archiving on this page first.");
-    }
-
-    const receipt = createPlannerCompletionReceipt();
-    await archiveTaskPageSubtreeToDone(ctx, node, getTimestamp(), receipt);
-    return { receipt };
+    const settings = await readWorkspaceSettings(ctx.db);
+    const result = await runWithReceipt(
+      ctx,
+      { action: "forceArchive", targetNodeId: args.nodeId, completionMode: settings.completionMode ?? "dueDate" },
+      () => forceArchiveCore(ctx, args.nodeId),
+    );
+    return { receipt: { ...result.receipt, receiptId: result.receiptId as string }, receiptId: result.receiptId };
   },
 });
+
+// Checked undo of stored completion receipts (Phase 4), in the order given
+// (the app sends a multi-item completion's receipts newest first). All or
+// nothing: if any receipt's items changed since, it throws an "undoRefused"
+// ConvexError naming what changed, and nothing is undone.
+export const undoCompletion = mutation({
+  args: {
+    ownerKey: v.string(),
+    receiptIds: v.array(v.string()),
+  },
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:undoCompletion");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const results = [];
+    for (const receiptId of args.receiptIds) {
+      results.push(await undoStoredReceipt(ctx, receiptId));
+    }
+    return results;
+  },
+});
+
+// Checked redo of undone receipts, in the order given: the items must still
+// be the way the undo left them, then the completion runs again with its
+// original mode (and planner). All or nothing, like undoCompletion.
+export const redoCompletion = mutation({
+  args: {
+    ownerKey: v.string(),
+    receiptIds: v.array(v.string()),
+  },
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:redoCompletion");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const results = [];
+    for (const receiptId of args.receiptIds) {
+      results.push(await redoStoredReceipt(ctx, receiptId, (row) => rerunReceiptAction(ctx, row)));
+    }
+    return results;
+  },
+});
+
+async function rerunReceiptAction(ctx: MutationCtx, row: Doc<"undoReceipts">) {
+  if (row.action === "forceArchive") {
+    const target = await ctx.db.get(row.targetNodeId);
+    if (!target || target.archived) {
+      return null;
+    }
+    return (await forceArchiveCore(ctx, row.targetNodeId)).receipt;
+  }
+  const target = await ctx.db.get(row.targetNodeId);
+  if (!target) {
+    return null;
+  }
+  const result = await runNodeCompletion(ctx, {
+    nodeId: row.targetNodeId,
+    intent: "complete",
+    completionMode: row.completionMode,
+    expectedRevision: target.revision ?? 0,
+    ...(row.plannerPageId ? { plannerPageId: row.plannerPageId } : {}),
+  });
+  return result.status === "applied" ? result.receipt : null;
+}
 
 export const setModelPageCustomPrompt = mutation({
   args: {

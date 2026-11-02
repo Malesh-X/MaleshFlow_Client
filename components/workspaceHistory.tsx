@@ -10,13 +10,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ConvexError } from "convex/values";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
   extractTrailingDraftEdits,
   limitHistoryEntries,
 } from "@/lib/domain/workspaceHistory";
 import type { RecurrenceFrequency } from "@/lib/domain/recurrence";
-import type { PlannerCompletionReceipt } from "@/lib/domain/planner";
 
 type NodeKind = "note" | "task";
 type TaskStatus = "todo" | "in_progress" | "done" | "cancelled" | null;
@@ -108,23 +108,13 @@ export type HistoryEntry =
       focusAfterRedoId: string | null;
     }
   | {
-      type: "complete_planner_task";
+      // Completions undo and redo through their stored server receipts
+      // (workspace:undoCompletion / redoCompletion), which refuse when the
+      // items changed since. Several receipts (a multi-item completion) undo
+      // all or nothing.
+      type: "completion_receipt";
       pageId: Id<"pages">;
-      // Which completion mutation redo should re-run: the planner-item flow or
-      // the task-page (archive-to-Done) flow. Undo always reverses via the
-      // receipt, which both flows produce in the same shape.
-      redoTarget:
-        // Completions made through workspace:setNodeCompletion redo the same way.
-        | { kind: "completion"; nodeId: Id<"nodes">; plannerPageId?: Id<"pages"> }
-        // Entries from before setNodeCompletion (still in an open tab's stack).
-        | { kind: "plannerNode"; plannerNodeId: Id<"nodes"> }
-        | { kind: "taskPage"; nodeId: Id<"nodes"> }
-        | { kind: "forceArchive"; nodeId: Id<"nodes"> };
-      completionMode: "dueDate" | "today";
-      // Server-issued record of everything the completion changed; refreshed
-      // in place when the entry is redone so a later undo reverses the redo's
-      // own effects.
-      receipt: PlannerCompletionReceipt;
+      receiptIds: string[];
       focusEditorId: string | null;
     }
   | {
@@ -175,24 +165,7 @@ type SetNodeTreesArchivedBatchFn = (args: {
   archived: boolean;
 }) => Promise<unknown>;
 
-type SetNodeCompletionFn = (args: {
-  ownerKey: string;
-  nodeId: Id<"nodes">;
-  intent: "complete" | "reopen";
-  completionMode: "dueDate" | "today";
-  expectedRevision: number;
-  plannerPageId?: Id<"pages">;
-}) => Promise<unknown>;
-
-type ForceArchiveTaskPageItemFn = (args: {
-  ownerKey: string;
-  nodeId: Id<"nodes">;
-}) => Promise<unknown>;
-
-type UndoCompletePlannerTaskFn = (args: {
-  ownerKey: string;
-  receipt: PlannerCompletionReceipt;
-}) => Promise<unknown>;
+type CompletionReceiptFn = (args: { ownerKey: string; receiptIds: string[] }) => Promise<unknown>;
 
 type UseWorkspaceHistoryArgs = {
   ownerKey: string;
@@ -204,11 +177,10 @@ type UseWorkspaceHistoryArgs = {
   moveNode: MoveNodeFn;
   setNodeTreeArchived: SetNodeTreeArchivedFn;
   setNodeTreesArchivedBatch: SetNodeTreesArchivedBatchFn;
-  setNodeCompletion: SetNodeCompletionFn;
-  // Current revision of a loaded node (redo passes it to setNodeCompletion).
-  getNodeRevision: (nodeId: Id<"nodes">) => number;
-  forceArchiveTaskPageItem: ForceArchiveTaskPageItemFn;
-  undoCompletePlannerTask: UndoCompletePlannerTaskFn;
+  undoCompletion: CompletionReceiptFn;
+  redoCompletion: CompletionReceiptFn;
+  // Shows a short message (a refused undo, or a failed one).
+  onHistoryMessage?: (message: string) => void;
   isDisabled?: boolean;
   draftCheckpointDelayMs?: number;
 };
@@ -317,6 +289,16 @@ export function useWorkspaceHistory() {
   return value;
 }
 
+// The message of a refused completion undo or redo (an "undoRefused"
+// ConvexError from convex/lib/undoReceipts.ts), or null for other errors.
+export function undoRefusalMessage(error: unknown) {
+  if (!(error instanceof ConvexError)) {
+    return null;
+  }
+  const data = error.data as { code?: unknown; message?: unknown } | null;
+  return data && data.code === "undoRefused" && typeof data.message === "string" ? data.message : null;
+}
+
 export function useWorkspaceHistoryController({
   ownerKey,
   selectedPageId,
@@ -327,10 +309,9 @@ export function useWorkspaceHistoryController({
   moveNode,
   setNodeTreeArchived,
   setNodeTreesArchivedBatch,
-  setNodeCompletion,
-  getNodeRevision,
-  forceArchiveTaskPageItem,
-  undoCompletePlannerTask,
+  undoCompletion,
+  redoCompletion,
+  onHistoryMessage,
   isDisabled = false,
   draftCheckpointDelayMs = 750,
 }: UseWorkspaceHistoryArgs) {
@@ -740,47 +721,10 @@ export function useWorkspaceHistoryController({
           return;
         }
 
-        case "complete_planner_task": {
-          if (isUndo) {
-            await undoCompletePlannerTask({ ownerKey, receipt: entry.receipt });
-          } else {
-            const target = entry.redoTarget;
-            const completionNodeId =
-              target.kind === "completion"
-                ? target.nodeId
-                : target.kind === "plannerNode"
-                  ? target.plannerNodeId
-                  : target.kind === "taskPage"
-                    ? target.nodeId
-                    : null;
-            const redoResult =
-              completionNodeId !== null
-                ? await setNodeCompletion({
-                    ownerKey,
-                    nodeId: completionNodeId,
-                    intent: "complete",
-                    completionMode: entry.completionMode,
-                    expectedRevision: getNodeRevision(completionNodeId),
-                    ...(target.kind === "completion" && target.plannerPageId
-                      ? { plannerPageId: target.plannerPageId }
-                      : {}),
-                  })
-                : await forceArchiveTaskPageItem({
-                    ownerKey,
-                    nodeId: (target as { nodeId: Id<"nodes"> }).nodeId,
-                  });
-            // Entries move between the undo/redo stacks by reference, so
-            // refreshing the receipt here keeps the next undo aligned with
-            // what this redo actually did (new clone ids, fresh syncs). The
-            // task-page flow wraps the receipt in its result object.
-            const nextReceipt =
-              redoResult && typeof redoResult === "object" && "receipt" in redoResult
-                ? (redoResult as { receipt: unknown }).receipt
-                : redoResult;
-            if (nextReceipt && typeof nextReceipt === "object") {
-              entry.receipt = nextReceipt as PlannerCompletionReceipt;
-            }
-          }
+        case "completion_receipt": {
+          // Undo newest first; redo in the original order.
+          const receiptIds = isUndo ? [...entry.receiptIds].reverse() : entry.receiptIds;
+          await (isUndo ? undoCompletion : redoCompletion)({ ownerKey, receiptIds });
           scheduleFocus(entry.focusEditorId);
           return;
         }
@@ -825,10 +769,9 @@ export function useWorkspaceHistoryController({
       }
     },
     [
-      setNodeCompletion,
-      getNodeRevision,
+      undoCompletion,
+      redoCompletion,
       ensureDraftSession,
-      forceArchiveTaskPageItem,
       moveNode,
       ownerKey,
       renamePage,
@@ -837,7 +780,6 @@ export function useWorkspaceHistoryController({
       setNodeTreesArchivedBatch,
       setSelectedPage,
       syncCommittedValue,
-      undoCompletePlannerTask,
       updateNode,
     ],
   );
@@ -862,11 +804,25 @@ export function useWorkspaceHistoryController({
         sourceStack.pop();
         targetStack.push(entry);
         refreshHistoryState();
+      } catch (error) {
+        const refusal = undoRefusalMessage(error);
+        if (refusal !== null) {
+          // The server refused (the items changed since) and changed nothing.
+          // This step can't be applied any more, so drop it; older steps
+          // stay available.
+          sourceStack.pop();
+          refreshHistoryState();
+          onHistoryMessage?.(refusal);
+        } else {
+          onHistoryMessage?.(
+            `Couldn't ${direction}: ${error instanceof Error ? error.message : "the request failed"}`,
+          );
+        }
       } finally {
         setIsApplyingHistory(false);
       }
     },
-    [applyHistoryEntry, flushActiveEditorDraft, isApplyingHistory, isDisabled, refreshHistoryState],
+    [applyHistoryEntry, flushActiveEditorDraft, isApplyingHistory, isDisabled, onHistoryMessage, refreshHistoryState],
   );
 
   useEffect(() => {

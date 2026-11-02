@@ -83,7 +83,6 @@ import {
   isPlannerLinkedTaskCopy,
   completionIntentFor,
   completionStateMatches,
-  isNodeCompleted,
   pageTypeForSection,
   type CompletionState,
   type PageType,
@@ -129,7 +128,6 @@ import {
 import { DEFAULT_AI_WORKING_MEMORY_TEXT } from "@/lib/domain/aiMemory";
 import {
   getEffectiveTaskDueDateRange,
-  plannerCompletionReceiptHasEffects,
   type PlannerCompletionReceipt,
 } from "@/lib/domain/planner";
 import {
@@ -911,7 +909,11 @@ type NodeCompletionRoute = "none" | "planner" | "plannerPreview" | "taskPage" | 
 type NodeCompletionResult = {
   status: "applied" | "noop" | "stale";
   route: NodeCompletionRoute;
+  // Inline receipt, only for routes that move the item away (planner, planner
+  // preview, Done archive). Kept for tabs from before Phase 4.
   receipt: PlannerCompletionReceipt | null;
+  // Stored receipt for workspace:undoCompletion, on every applied completion.
+  receiptId?: string | null;
   before: CompletionState;
   after: CompletionState | null;
 };
@@ -3665,71 +3667,26 @@ function insertTextIntoDraft(
   };
 }
 
-// The undo entry for one setNodeCompletion result. Planner and task-page
-// completions undo through their receipt; status, note and recurring changes
-// undo by restoring the item's values. Returns null when nothing changed.
+// The undo entry for setNodeCompletion results: undo and redo go through the
+// stored receipts, which the server checks first. Returns null when nothing
+// changed.
 function buildCompletionHistoryEntry({
-  node,
-  text,
-  result,
-  completionMode,
-  plannerPageId,
+  receiptIds,
   pageId,
   focusEditorId,
 }: {
-  node: {
-    _id: string;
-    kind: string;
-    taskStatus?: string | null;
-    sourceMeta?: unknown;
-    dueAt?: number | null;
-    dueEndAt?: number | null;
-    dueTime?: string | null;
-    dueTimeZone?: string | null;
-  };
-  text: string;
-  result: NodeCompletionResult;
-  completionMode: RecurringCompletionMode;
-  plannerPageId: Id<"pages"> | null;
+  receiptIds: Array<string | null | undefined>;
   pageId: Id<"pages">;
-  focusEditorId: string;
+  focusEditorId: string | null;
 }): HistoryEntry | null {
-  if (result.status !== "applied") {
-    return null;
-  }
-  const nodeId = node._id as Id<"nodes">;
-  if (result.receipt) {
-    if (!plannerCompletionReceiptHasEffects(result.receipt)) {
-      return null;
-    }
-    return {
-      type: "complete_planner_task",
-      pageId,
-      redoTarget: {
-        kind: "completion",
-        nodeId,
-        ...(result.route === "plannerPreview" && plannerPageId ? { plannerPageId } : {}),
-      },
-      completionMode,
-      receipt: result.receipt,
-      focusEditorId,
-    };
-  }
-  if (!result.after) {
-    return null;
-  }
-  const before: NodeValueSnapshot = {
-    ...toNodeValueSnapshot({ ...node, text } as Parameters<typeof toNodeValueSnapshot>[0]),
-    text,
-  };
-  const after: NodeValueSnapshot = {
-    ...before,
-    taskStatus: (before.kind === "task" ? result.after.taskStatus : null) as NodeValueSnapshot["taskStatus"],
-    noteCompleted: result.after.noteCompleted,
-    dueAt: result.after.dueAt,
-    dueEndAt: result.after.dueEndAt,
-  };
-  return { type: "update_node", pageId, nodeId, before, after, focusEditorId };
+  const ids = receiptIds.filter((id): id is string => Boolean(id));
+  return ids.length ? { type: "completion_receipt", pageId, receiptIds: ids, focusEditorId } : null;
+}
+
+// A completion that moves the item away (planner Past Weeks, Done archive,
+// planner preview) rather than changing it in place.
+function completionMovesItem(result: NodeCompletionResult) {
+  return result.status === "applied" && result.receipt !== null;
 }
 
 function toNodeValueSnapshot(
@@ -4874,9 +4831,8 @@ function ConfiguredWorkspace({
   const suggestRandomPlannerTask = useAction(api.plannerAi.suggestRandomPlannerTask);
   const addRandomPlannerTaskWithAi = useAction(api.plannerAi.addRandomPlannerTaskWithAi);
   const suggestNextPlannerTask = useAction(api.plannerAi.suggestNextPlannerTask);
-  const undoCompletePlannerTaskRaw = useMutation(api.planner.undoCompletePlannerTask);
-  // Latest loaded nodes, for callers that run after an await (redo, retries).
-  const latestNodeMapRef = useRef<Map<string, CompletableNode>>(new Map());
+  const undoCompletionRaw = useMutation(api.workspace.undoCompletion);
+  const redoCompletionRaw = useMutation(api.workspace.redoCompletion);
   // Sends the revision the caller saw. A stale answer is retried once with the
   // server's revision only when the item still looks the way the caller saw it
   // (see completionStateMatches), so a text edit doesn't block the checkbox but
@@ -4884,23 +4840,13 @@ function ConfiguredWorkspace({
   const setNodeCompletionChecked = useCallback(
     async (
       args: Parameters<typeof setNodeCompletionMutation>[0],
-      seen: CompletableNode | "redo",
+      seen: CompletableNode,
     ): Promise<NodeCompletionResult> => {
       const first = (await setNodeCompletionMutation(args)) as NodeCompletionResult;
       if (first.status !== "stale") {
         return first;
       }
-      // Redo of an item this view hasn't loaded (a planner preview's source):
-      // the user asked for it again, so retry unless it's already in that state.
-      const retry =
-        seen === "redo"
-          ? !first.before.archived && (args.intent === "complete") !== isNodeCompleted({
-              kind: first.before.kind,
-              taskStatus: first.before.taskStatus,
-              sourceMeta: { noteCompleted: first.before.noteCompleted },
-            })
-          : completionStateMatches(seen, first.before);
-      if (!retry) {
+      if (!completionStateMatches(seen, first.before)) {
         return first;
       }
       return (await setNodeCompletionMutation({
@@ -4929,22 +4875,6 @@ function ConfiguredWorkspace({
         "Could not update that item.",
       ),
     [ownerKey, recurringCompletionMode, runTrackedMutation, setNodeCompletionChecked],
-  );
-  // History redo: re-complete with whatever revision is loaded now.
-  const redoNodeCompletion = useCallback(
-    (args: {
-      ownerKey: string;
-      nodeId: Id<"nodes">;
-      intent: "complete" | "reopen";
-      completionMode: RecurringCompletionMode;
-      expectedRevision: number;
-      plannerPageId?: Id<"pages">;
-    }) => setNodeCompletionChecked(args, latestNodeMapRef.current.get(args.nodeId as string) ?? "redo"),
-    [setNodeCompletionChecked],
-  );
-  const getNodeRevision = useCallback(
-    (nodeId: Id<"nodes">) => latestNodeMapRef.current.get(nodeId as string)?.revision ?? 0,
-    [],
   );
   const findNodesText = useAction(api.ai.findNodesText);
   const searchNodes = useAction(api.ai.searchNodes);
@@ -5235,10 +5165,9 @@ function ConfiguredWorkspace({
     moveNode: moveNodeRaw,
     setNodeTreeArchived: setNodeTreeArchivedRaw,
     setNodeTreesArchivedBatch: setNodeTreesArchivedBatchRaw,
-    setNodeCompletion: redoNodeCompletion,
-    getNodeRevision,
-    forceArchiveTaskPageItem: forceArchiveTaskPageItemRaw,
-    undoCompletePlannerTask: undoCompletePlannerTaskRaw,
+    undoCompletion: undoCompletionRaw,
+    redoCompletion: redoCompletionRaw,
+    onHistoryMessage: setCopySnackbarMessage,
     isDisabled: activePageTree?.page?.archived ?? false,
   });
 
@@ -6069,9 +5998,6 @@ function ConfiguredWorkspace({
     multiPageIncludedPageTrees,
     sidebarTree?.nodes,
   ]);
-  useEffect(() => {
-    latestNodeMapRef.current = workspaceNodeMap;
-  }, [workspaceNodeMap]);
   const paletteContextNodeId =
     selectedNodeIds.size === 1 ? ([...selectedNodeIds][0] ?? null) : actionContextNodeId;
   const taskScheduleTargetNode = useMemo(() => {
@@ -8237,25 +8163,22 @@ function ConfiguredWorkspace({
       const result = (await forceArchiveTaskPageItemRaw({
         ownerKey,
         nodeId: targetNode._id as Id<"nodes">,
-      })) as { receipt?: PlannerCompletionReceipt } | null;
+      })) as { receiptId?: string | null } | null;
       setCopySnackbarMessage("Archived the item to Done");
-      const receipt = result?.receipt ?? null;
-      if (plannerCompletionReceiptHasEffects(receipt)) {
-        history.pushUndoEntry({
-          type: "complete_planner_task",
-          pageId: targetNode.pageId as Id<"pages">,
-          redoTarget: { kind: "forceArchive", nodeId: targetNode._id as Id<"nodes"> },
-          completionMode: recurringCompletionMode,
-          receipt: receipt!,
-          focusEditorId: getNodeEditorId(targetNode._id as Id<"nodes">),
-        });
+      const entry = buildCompletionHistoryEntry({
+        receiptIds: [result?.receiptId],
+        pageId: targetNode.pageId as Id<"pages">,
+        focusEditorId: getNodeEditorId(targetNode._id as Id<"nodes">),
+      });
+      if (entry) {
+        history.pushUndoEntry(entry);
       }
     } catch (error) {
       setCopySnackbarMessage(
         error instanceof Error ? error.message : "Could not force archive the item.",
       );
     }
-  }, [forceArchiveTargetNode, forceArchiveTaskPageItemRaw, history, ownerKey, recurringCompletionMode]);
+  }, [forceArchiveTargetNode, forceArchiveTaskPageItemRaw, history, ownerKey]);
 
   const handleExportDataDump = useCallback(async () => {
     if (isExportingDataDump) {
@@ -10631,9 +10554,12 @@ function ConfiguredWorkspace({
     }
 
     // Each item goes through workspace:setNodeCompletion, which routes it
-    // (planner, task page Done archive, recurring, note, plain task).
-    const updateEntries: Array<Extract<HistoryEntry, { type: "update_node" }>> = [];
+    // (planner, task page Done archive, recurring, note, plain task). One undo
+    // step covers them all.
+    const receiptIds: string[] = [];
     let clearSelection = false;
+    let firstPageId: Id<"pages"> | null = null;
+    let lastNodeId: string | null = null;
     for (const nodeId of orderedSelectedNodeIds) {
       const node = workspaceNodeMap.get(nodeId);
       if (!node || isNodeLocked(node)) {
@@ -10646,25 +10572,15 @@ function ConfiguredWorkspace({
       }
 
       const result = await completeNode(node, completionIntentFor(node));
-      const entry = buildCompletionHistoryEntry({
-        node,
-        text: node.text,
-        result,
-        completionMode: recurringCompletionMode,
-        plannerPageId: null,
-        pageId: node.pageId as Id<"pages">,
-        focusEditorId: getNodeEditorId(node._id as Id<"nodes">),
-      });
-      if (result.receipt) {
-        // Planner and Done-archive completions move the item away.
-        clearSelection = true;
-        if (entry) {
-          history.pushUndoEntry(entry);
-        }
+      if (result.status !== "applied" || !result.receiptId) {
         continue;
       }
-      if (entry?.type === "update_node") {
-        updateEntries.push(entry);
+      receiptIds.push(result.receiptId);
+      firstPageId ??= node.pageId as Id<"pages">;
+      lastNodeId = nodeId;
+      if (completionMovesItem(result)) {
+        // Planner and Done-archive completions move the item away.
+        clearSelection = true;
       }
     }
 
@@ -10672,27 +10588,22 @@ function ConfiguredWorkspace({
       clearNodeSelection();
     }
 
-    if (updateEntries.length === 0) {
+    const entry =
+      firstPageId && lastNodeId
+        ? buildCompletionHistoryEntry({
+            receiptIds,
+            pageId: firstPageId,
+            focusEditorId: getNodeEditorId(lastNodeId as Id<"nodes">),
+          })
+        : null;
+    if (!entry) {
       return;
     }
-
-    if (updateEntries.length === 1) {
-      const entry = updateEntries[0]!;
-      history.pushUndoEntry(entry);
-      if (!clearSelection) {
-        selectSingleNode(entry.nodeId as string);
-      }
-      return;
+    history.pushUndoEntry(entry);
+    if (!clearSelection && receiptIds.length === 1 && lastNodeId) {
+      selectSingleNode(lastNodeId);
     }
-
-    history.pushUndoEntry({
-      type: "compound",
-      pageId: updateEntries[0]!.pageId,
-      entries: updateEntries,
-      focusAfterUndoId: updateEntries[0]!.focusEditorId,
-      focusAfterRedoId: updateEntries[updateEntries.length - 1]!.focusEditorId,
-    });
-  }, [clearNodeSelection, completeNode, history, pagesById, recurringCompletionMode, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
+  }, [clearNodeSelection, completeNode, history, pagesById, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
 
   const deleteHighlightedNodes = useCallback(async () => {
     if (selectedNodeIds.size === 0) {
@@ -20366,16 +20277,14 @@ function OutlineNodeEditor({
       intent === "complete" && node.kind === "task" ? plannerLinkedSourceCompletionPageId : null;
     const result = await completeNode(node, intent, plannerPageId);
     const toggleEntry = buildCompletionHistoryEntry({
-      node,
-      text: saveResult.parsed.text,
-      result,
-      completionMode: recurringCompletionMode,
-      plannerPageId,
+      receiptIds: result.status === "applied" ? [result.receiptId] : [],
       pageId: pageId as Id<"pages">,
       focusEditorId: editorId,
     });
 
-    if (toggleEntry?.type === "update_node") {
+    if (toggleEntry && !completionMovesItem(result)) {
+      // The item stays where it is: one undo step covers the text edit that
+      // was saved first and the completion.
       history.commitTrackedValue(editorId, editorTarget, saveResult.parsed.text);
       setDraft(saveResult.parsed.text);
       history.pushUndoEntry(

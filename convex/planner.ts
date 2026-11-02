@@ -8,6 +8,7 @@ import {
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { assertOwnerKeyGuarded } from "./lib/authThrottle";
+import { restoreCompletionReceipt, undoStoredReceipt } from "./lib/undoReceipts";
 import { taskStatusValidator } from "./lib/validators";
 import {
   appendPlannerDayCore,
@@ -29,12 +30,8 @@ import {
 import {
   collectNodeTree,
   computeNodePosition,
-  deleteNodeTree,
-  enqueueNodeAiWork,
   enqueuePageRootEmbeddingRefresh,
   listPageNodes,
-  setNodeTreeArchivedState,
-  syncLinksForNode,
 } from "./lib/workspace";
 import {
   arePlannerMergeSubtreeTextsEquivalent,
@@ -884,13 +881,13 @@ const plannerCompletionReceiptValidator = v.object({
   ),
   archivedRootNodeId: v.union(v.string(), v.null()),
   pastWeeksCloneRootNodeId: v.union(v.string(), v.null()),
+  receiptId: v.optional(v.string()),
 });
 
-// Reverses a completePlannerTask call from its receipt: deletes the nodes the
-// completion created (Past Weeks archive clone, recurring sidebar copies),
-// unarchives the planner subtree, and restores the patched planner nodes and
-// source tasks to their recorded before-states. Nodes that no longer exist are
-// skipped so a stale receipt degrades to a partial restore instead of failing.
+// Legacy adapter for tabs opened before Phase 4, which send the receipt
+// itself. A receipt that carries `receiptId` (returned since Phase 4) goes
+// through the checked undo (workspace:undoCompletion). Older receipts restore
+// their recorded before-states unchecked, as before, and are logged.
 export const undoCompletePlannerTask = mutation({
   args: {
     ownerKey: v.string(),
@@ -899,109 +896,12 @@ export const undoCompletePlannerTask = mutation({
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "planner:undoCompletePlannerTask");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    const now = Date.now();
-    const touchedPageIds = new Set<string>();
-
-    const createdNodeIds = [
-      ...(args.receipt.pastWeeksCloneRootNodeId
-        ? [args.receipt.pastWeeksCloneRootNodeId]
-        : []),
-      ...args.receipt.appendedPlannerNodeIds,
-    ];
-    for (const rawNodeId of createdNodeIds) {
-      const nodeId = ctx.db.normalizeId("nodes", rawNodeId);
-      if (!nodeId) {
-        continue;
-      }
-      const node = await ctx.db.get(nodeId);
-      if (!node) {
-        continue;
-      }
-      touchedPageIds.add(node.pageId as string);
-      await deleteNodeTree(ctx.db, nodeId);
+    if (args.receipt.receiptId) {
+      await undoStoredReceipt(ctx, args.receipt.receiptId);
+      return null;
     }
-
-    if (args.receipt.archivedRootNodeId) {
-      const rootNodeId = ctx.db.normalizeId("nodes", args.receipt.archivedRootNodeId);
-      const rootNode = rootNodeId ? await ctx.db.get(rootNodeId) : null;
-      if (rootNodeId && rootNode) {
-        const descendants = await setNodeTreeArchivedState(ctx.db, rootNodeId, false, now);
-        for (const descendant of descendants) {
-          await syncLinksForNode(ctx.db, { ...descendant, archived: false });
-          await enqueueNodeAiWork(ctx, descendant._id);
-        }
-        touchedPageIds.add(rootNode.pageId as string);
-      }
-    }
-
-    for (const entry of args.receipt.plannerNodes) {
-      const nodeId = ctx.db.normalizeId("nodes", entry.nodeId);
-      const node = nodeId ? await ctx.db.get(nodeId) : null;
-      if (!nodeId || !node) {
-        continue;
-      }
-      await ctx.db.patch(nodeId, {
-        taskStatus: entry.taskStatus,
-        dueAt: entry.dueAt,
-        dueEndAt: entry.dueEndAt,
-        sourceMeta: entry.sourceMeta === null ? undefined : entry.sourceMeta,
-        updatedAt: now,
-      });
-      touchedPageIds.add(node.pageId as string);
-    }
-
-    for (const entry of args.receipt.sourceTasks) {
-      const nodeId = ctx.db.normalizeId("nodes", entry.nodeId);
-      const node = nodeId ? await ctx.db.get(nodeId) : null;
-      if (!nodeId || !node) {
-        continue;
-      }
-      await ctx.db.patch(nodeId, {
-        taskStatus: entry.taskStatus,
-        dueAt: entry.dueAt,
-        dueEndAt: entry.dueEndAt,
-        ...(typeof entry.occurrenceIndex === "number"
-          ? { sourceMeta: { ...getNodeSourceMeta(node), occurrenceIndex: entry.occurrenceIndex } }
-          : {}),
-        updatedAt: now,
-      });
-      touchedPageIds.add(node.pageId as string);
-    }
-
-    for (const favorite of args.receipt.deletedFavorites) {
-      const targetPageId = ctx.db.normalizeId("pages", favorite.targetPageId);
-      const targetNodeId = favorite.targetNodeId
-        ? ctx.db.normalizeId("nodes", favorite.targetNodeId)
-        : null;
-      if (!targetPageId || (favorite.targetNodeId && !targetNodeId)) {
-        continue;
-      }
-      const existing = await ctx.db
-        .query("sidebarFavorites")
-        .withIndex("by_target", (query) =>
-          query
-            .eq("targetKind", favorite.targetKind)
-            .eq("targetPageId", targetPageId)
-            .eq("targetNodeId", targetNodeId),
-        )
-        .first();
-      if (existing) {
-        continue;
-      }
-      await ctx.db.insert("sidebarFavorites", {
-        targetKind: favorite.targetKind,
-        targetPageId,
-        targetNodeId,
-        position: favorite.position,
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-
-    for (const pageId of touchedPageIds) {
-      await enqueuePageRootEmbeddingRefresh(ctx, pageId as Id<"pages">);
-    }
-
+    console.log("[legacy undo] planner:undoCompletePlannerTask without a stored receipt");
+    await restoreCompletionReceipt(ctx, args.receipt);
     return null;
   },
 });
