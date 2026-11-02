@@ -323,7 +323,8 @@ function parseOutline(markdown: string) {
   const stack: { indent: number; clientId: string }[] = [];
   const lastChildByParent = new Map<string, string>();
   markdown.split("\n").forEach((line, index) => {
-    const match = line.match(/^(\s*)[-*]\s+(?:\[( |x|X)\]\s+)?(.*)$/);
+    // "[ ]", "[x]" and "%%" stay in the text: the server reads them (parseDraft).
+    const match = line.match(/^(\s*)[-*]\s+(.*)$/);
     if (!match) return;
     const indent = match[1].replace(/\t/g, "  ").length;
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
@@ -332,10 +333,9 @@ function parseOutline(markdown: string) {
     const previous = lastChildByParent.get(parent ?? "root");
     entries.push({
       clientId,
-      text: match[3].trim(),
+      text: match[2].trim(),
       ...(parent ? { parentClientId: parent } : {}),
       ...(previous ? { afterClientId: previous } : {}),
-      ...(match[2] !== undefined ? { kind: "task", taskStatus: match[2] === " " ? "todo" : "done" } : {}),
     });
     lastChildByParent.set(parent ?? "root", clientId);
     stack.push({ indent, clientId });
@@ -531,6 +531,7 @@ async function main() {
       const nodeId = await mutation("workspace:createNode", {
         pageId,
         text: text.join(" "),
+        parseDraft: true,
         ...(parent !== undefined ? { parentNodeId: parent } : {}),
         ...(after !== undefined ? { afterNodeId: after === "top" ? null : after } : {}),
         ...(isTask ? { kind: "task", taskStatus: "todo" } : {}),
@@ -549,7 +550,7 @@ async function main() {
       if (primarySectionSlot(tree.page) === "requireParent") fail("Planner pages need --parent (a day or section id from `tree`).");
       // Top-level outline items name no parent, so the server adds them at the
       // end of the page's primary section.
-      return ok(await mutation("workspace:createNodesBatch", { pageId, nodes }));
+      return ok(await mutation("workspace:createNodesBatch", { pageId, nodes, parseDraft: true }));
     }
     case "update": {
       const nodeId = rest[0];
@@ -575,7 +576,7 @@ async function main() {
 
       const args: Record<string, unknown> = { nodeId };
       if (flags.task || flags.note) Object.assign(args, kindChangeArgs(node, nextKind as "task" | "note"));
-      if (str("text") !== undefined) args.text = str("text");
+      if (str("text") !== undefined) Object.assign(args, { text: str("text"), parseDraft: true });
       if (status) args.taskStatus = status;
       if (priority) args.priority = priority === "none" ? null : priority;
       if (dueAt !== undefined) Object.assign(args, scheduleForDue(dueAt, { dueEndAt: args.dueEndAt === null ? null : node.dueEndAt }));

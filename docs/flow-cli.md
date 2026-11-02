@@ -141,6 +141,12 @@ machine's time zone (e.g. `Pacific/Honolulu`).
 Lines that don't start with `-` or `*` are ignored. Items are plain notes or
 tasks; set dates, priority or recurrence afterwards with `update`.
 
+`add`, `add-outline` and `update --text` send `parseDraft: true`, so the server
+reads the text the way the app's editor does: `[ ] ` makes an open task, `[x] `
+a done task, a leading `%%` (dimmed) is kept, `---` is a separator note, and
+empty text is refused. Like the app, `update --text "[x] ..."` sets the status
+directly and doesn't run the completion routing; use `done` for that.
+
 ## Examples
 
 ```bash

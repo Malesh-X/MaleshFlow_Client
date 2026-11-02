@@ -64,6 +64,7 @@ import {
   completePlannerSourceTaskInstance,
 } from "./lib/planner";
 import { replaceLiteralOccurrences } from "../lib/domain/findReplace";
+import { parseNodeDraftWithFallback } from "../lib/domain/nodeDraft";
 import {
   compareLinkAutocompletePriority,
   isTemplateLinkPage,
@@ -138,6 +139,30 @@ function normalizeTaskStatusForKind(
   fallbackTaskStatus: NodeTaskStatus | undefined = undefined,
 ) {
   return kind === "task" ? (taskStatus ?? fallbackTaskStatus ?? "todo") : null;
+}
+
+// `parseDraft` (Phase 3, change 6): read the app's draft syntax from `text`
+// ("[ ] ", "[x] ", "%%", "---"; see lib/domain/nodeDraft.ts), the way the
+// app's editor and composer do before they save. Empty text is refused. A
+// marker sets the kind and status; plain text keeps `fallback`. Only the CLI
+// opts in; the app parses before it sends.
+function applyDraftSyntax<T extends { text?: string; kind?: NodeKind; taskStatus?: NodeTaskStatus }>(
+  args: T,
+  fallback: { kind: NodeKind; taskStatus: NodeTaskStatus | null },
+): T {
+  if (args.text === undefined) {
+    return args;
+  }
+  const base = { kind: args.kind ?? fallback.kind, taskStatus: args.taskStatus ?? fallback.taskStatus };
+  const parsed = parseNodeDraftWithFallback(args.text, base);
+  if (parsed.shouldDelete) {
+    throw new ConvexError("The item's text is empty.");
+  }
+  const next = { ...args, text: parsed.text };
+  if (parsed.kind !== base.kind || parsed.taskStatus !== (base.kind === "task" ? (base.taskStatus ?? "todo") : null)) {
+    return { ...next, kind: parsed.kind, taskStatus: (parsed.taskStatus ?? undefined) as T["taskStatus"] };
+  }
+  return next;
 }
 
 const MAX_BACKLINK_COUNT_NODE_BATCH = 250;
@@ -5989,9 +6014,13 @@ export const createNode = mutation({
     dueAt: v.optional(v.union(v.number(), v.null())),
     dueEndAt: v.optional(v.union(v.number(), v.null())),
     recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
+    parseDraft: v.optional(v.boolean()),
   },
-  handler: async (rawCtx, args) => {
+  handler: async (rawCtx, rawArgs) => {
     const ctx = withGuards(rawCtx, "workspace:createNode");
+    const args = rawArgs.parseDraft
+      ? applyDraftSyntax({ ...rawArgs, text: rawArgs.text ?? "" }, { kind: "note", taskStatus: null })
+      : rawArgs;
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
     await assertPageWritable(ctx, args.pageId);
@@ -6043,9 +6072,18 @@ export const createNodesBatch = mutation({
     ownerKey: v.string(),
     pageId: v.id("pages"),
     nodes: v.array(nodeCreateInputValidator),
+    parseDraft: v.optional(v.boolean()),
   },
-  handler: async (rawCtx, args) => {
+  handler: async (rawCtx, rawArgs) => {
     const ctx = withGuards(rawCtx, "workspace:createNodesBatch");
+    const args = rawArgs.parseDraft
+      ? {
+          ...rawArgs,
+          nodes: rawArgs.nodes.map((entry) =>
+            applyDraftSyntax({ ...entry, text: entry.text ?? "" }, { kind: "note", taskStatus: null }),
+          ),
+        }
+      : rawArgs;
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     const now = getTimestamp();
     const createdNodes: Doc<"nodes">[] = [];
@@ -6157,14 +6195,19 @@ export const updateNode = mutation({
     dueTime: v.optional(v.union(v.string(), v.null())),
     dueTimeZone: v.optional(v.union(v.string(), v.null())),
     recurrenceFrequency: v.optional(recurrenceFrequencyValidator),
+    parseDraft: v.optional(v.boolean()),
   },
-  handler: async (rawCtx, args) => {
+  handler: async (rawCtx, rawArgs) => {
     const ctx = withGuards(rawCtx, "workspace:updateNode");
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    const node = await ctx.db.get(args.nodeId);
+    await assertOwnerKeyGuarded(ctx.db, rawArgs.ownerKey);
+    const node = await ctx.db.get(rawArgs.nodeId);
     if (!node) {
       throw new Error("Node not found.");
     }
+    // Plain text keeps the item's kind and status; a marker changes them.
+    const args = rawArgs.parseDraft
+      ? applyDraftSyntax(rawArgs, { kind: node.kind, taskStatus: node.taskStatus ?? null })
+      : rawArgs;
     await assertNodeEditable(ctx, node, changeForUpdate(node, args));
 
     const patch: Partial<Doc<"nodes">> = {

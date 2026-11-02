@@ -74,6 +74,7 @@ import {
   type RecurrenceFrequency,
   type RecurringCompletionMode,
 } from "@/lib/domain/recurrence";
+import { parseNodeDraft, parseNodeDraftWithFallback } from "@/lib/domain/nodeDraft";
 import {
   SIDEBAR_SECTIONS,
   getNodeMeta,
@@ -3498,127 +3499,6 @@ function getAncestorNodeIds(
   }
 
   return ancestorNodeIds;
-}
-
-function parseNodeDraft(draft: string) {
-  const trimmed = draft.trim();
-
-  if (trimmed.length === 0) {
-    return { shouldDelete: true as const };
-  }
-
-  const dimPrefix = trimmed.match(/^%%\s*/)?.[0] ?? "";
-  const content = dimPrefix ? trimmed.slice(dimPrefix.length) : trimmed;
-
-  if (content.trim().length === 0) {
-    return { shouldDelete: true as const };
-  }
-
-  const doneMatch = content.match(/^\[x\]\s*(.*)$/i);
-  if (doneMatch) {
-    const text = doneMatch[1]?.trim() ?? "";
-    return text.length === 0
-      ? { shouldDelete: true as const }
-      : {
-          shouldDelete: false as const,
-          text: `${dimPrefix}${text}`,
-          kind: "task" as const,
-          taskStatus: "done" as const,
-        };
-  }
-
-  const todoMatch = content.match(/^\[\s\]\s*(.*)$/);
-  if (todoMatch) {
-    const text = todoMatch[1]?.trim() ?? "";
-    return text.length === 0
-      ? { shouldDelete: true as const }
-      : {
-          shouldDelete: false as const,
-          text: `${dimPrefix}${text}`,
-          kind: "task" as const,
-          taskStatus: "todo" as const,
-        };
-  }
-
-  if (isSeparatorLineText(content)) {
-    return {
-      shouldDelete: false as const,
-      text: trimmed,
-      kind: "note" as const,
-      taskStatus: null,
-    };
-  }
-
-  return {
-    shouldDelete: false as const,
-    text: trimmed,
-    kind: "note" as const,
-    taskStatus: null,
-  };
-}
-
-function parseNodeDraftWithFallback(
-  draft: string,
-  fallback: {
-    kind: "note" | "task";
-    taskStatus: "todo" | "in_progress" | "done" | "cancelled" | null;
-  },
-) {
-  const trimmed = draft.trim();
-  if (trimmed.length === 0) {
-    return { shouldDelete: true as const };
-  }
-
-  const dimPrefix = trimmed.match(/^%%\s*/)?.[0] ?? "";
-  const content = dimPrefix ? trimmed.slice(dimPrefix.length) : trimmed;
-  if (content.trim().length === 0) {
-    return { shouldDelete: true as const };
-  }
-
-  const doneMatch = content.match(/^\[x\]\s*(.*)$/i);
-  if (doneMatch) {
-    const text = doneMatch[1]?.trim() ?? "";
-    return text.length === 0
-      ? { shouldDelete: true as const }
-      : {
-          shouldDelete: false as const,
-          text: `${dimPrefix}${text}`,
-          kind: "task" as const,
-          taskStatus: "done" as const,
-        };
-  }
-
-  const todoMatch = content.match(/^\[\s\]\s*(.*)$/);
-  if (todoMatch) {
-    const text = todoMatch[1]?.trim() ?? "";
-    return text.length === 0
-      ? { shouldDelete: true as const }
-      : {
-          shouldDelete: false as const,
-          text: `${dimPrefix}${text}`,
-          kind: "task" as const,
-          taskStatus: "todo" as const,
-        };
-  }
-
-  if (isSeparatorLineText(content)) {
-    return {
-      shouldDelete: false as const,
-      text: trimmed,
-      kind: "note" as const,
-      taskStatus: null,
-    };
-  }
-
-  return {
-    shouldDelete: false as const,
-    text: trimmed,
-    kind: fallback.kind,
-    taskStatus:
-      fallback.kind === "task"
-        ? ((fallback.taskStatus ?? "todo") as "todo" | "in_progress" | "done" | "cancelled")
-        : null,
-  };
 }
 
 function parseSplitSegmentDraft(
