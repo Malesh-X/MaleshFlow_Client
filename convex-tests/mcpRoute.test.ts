@@ -199,6 +199,8 @@ test("/api/mcp: 401 with WWW-Authenticate without a token; tools work with one",
   expect(shown.text).toContain("due: 2026-12-01");
   const done = await call("complete_item", { nodeId });
   expect(done.text).toMatch(/Undo receipt: \S+/);
+  // No workspace setting and no per-task basis: repeat from today.
+  expect(done.text).toContain("(mode today)");
   const undone = await call("undo_complete", { receiptId: done.text.match(/Undo receipt: (\S+)/)![1] });
   expect(undone.text).toBe("Undone.");
 

@@ -68,6 +68,7 @@ import {
   formatDueDateRange,
   getCompactRecurrenceLabel,
   getRecurrenceBasis,
+  DEFAULT_COMPLETION_MODE,
   getRecurrenceLabel,
   getTodayReferenceDate,
   isOverdueDueDateRange,
@@ -3877,7 +3878,7 @@ function ConfiguredWorkspace({
   const [directSchedulePaletteNode, setDirectSchedulePaletteNode] =
     useState<SchedulePaletteNode | null>(null);
   const [recurringCompletionMode, setRecurringCompletionMode] =
-    useState<RecurringCompletionMode>("dueDate");
+    useState<RecurringCompletionMode>(DEFAULT_COMPLETION_MODE);
   const [plannerSidebarWidth, setPlannerSidebarWidth] = useState(
     PLANNER_RIGHT_SIDEBAR_DEFAULT_WIDTH,
   );
@@ -4155,7 +4156,7 @@ function ConfiguredWorkspace({
     if (workspaceSettings.completionMode) {
       setRecurringCompletionMode(workspaceSettings.completionMode);
     } else {
-      setRecurringCompletionMode(storedCompletionMode ?? "dueDate");
+      setRecurringCompletionMode(storedCompletionMode ?? DEFAULT_COMPLETION_MODE);
     }
     const migrateTimeZone = !workspaceSettings.timeZone && !!browserTimeZone;
     const migrateCompletionMode = !workspaceSettings.completionMode && storedCompletionMode !== null;

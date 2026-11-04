@@ -373,8 +373,8 @@ const ROUTE_LABELS: Record<string, string> = {
 
 async function completeLikeApp(nodeId: string) {
   const settings = await workspaceSettings();
-  // --mode overrides the workspace setting; the app's default is dueDate.
-  const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? settings.completionMode ?? "dueDate";
+  // --mode overrides the workspace setting; the default is today.
+  const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? settings.completionMode ?? "today";
   const info = (await resolveNodes([nodeId])).get(nodeId);
   if (info?.archived) await loadVisibleNodePage(nodeId, info);
   if (info?.archived) {

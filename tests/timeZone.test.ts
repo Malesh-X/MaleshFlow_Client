@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { advanceRecurringDueDate, advanceRecurringDueDateRange, getTodayReferenceDate } from "../lib/domain/recurrence";
+import { advanceRecurringDueDate, advanceRecurringDueDateRange, completionModeFor, DEFAULT_COMPLETION_MODE, getTodayReferenceDate } from "../lib/domain/recurrence";
 import { addPlannerCalendarDays, getPlannerWeekdayName, plannerDayMatchesDueDateRange } from "../lib/domain/planner";
 import {
   addCalendarUnits,
@@ -109,4 +109,10 @@ test("completions in due-date mode skip occurrences that are already past", () =
   assert.equal(next(at(1, 15), "monthly"), at(11, 15)); // steps from the original date
   // Without skipPast, due-date mode still ignores the clock.
   assert.equal(advanceRecurringDueDate({ dueAt: at(10, 20), frequency: { interval: 4, unit: "day" }, mode: "dueDate", now, timeZone: HNL }), at(10, 24));
+});
+
+test("completion basis defaults to today; a task's own basis wins", () => {
+  assert.equal(DEFAULT_COMPLETION_MODE, "today");
+  assert.equal(completionModeFor({ sourceMeta: {} }, DEFAULT_COMPLETION_MODE), "today");
+  assert.equal(completionModeFor({ sourceMeta: { recurrenceBasis: "dueDate" } }, DEFAULT_COMPLETION_MODE), "dueDate");
 });

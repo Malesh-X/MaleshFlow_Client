@@ -93,6 +93,7 @@ import {
 import {
   advanceRecurringDueDateRange,
   completionModeFor,
+  DEFAULT_COMPLETION_MODE,
   parseRecurrenceFrequency,
   type RecurringCompletionMode,
 } from "../lib/domain/recurrence";
@@ -5501,7 +5502,7 @@ export const forceArchiveTaskPageItem = mutation({
     const settings = await readWorkspaceSettings(ctx.db);
     const result = await runWithReceipt(
       ctx,
-      { action: "forceArchive", targetNodeId: args.nodeId, completionMode: settings.completionMode ?? "dueDate" },
+      { action: "forceArchive", targetNodeId: args.nodeId, completionMode: settings.completionMode ?? DEFAULT_COMPLETION_MODE },
       () => forceArchiveCore(ctx, args.nodeId),
     );
     return { receipt: { ...result.receipt, receiptId: result.receiptId as string }, receiptId: result.receiptId };

@@ -27,6 +27,7 @@ import {
 } from "../flow/logic";
 import { shouldOrderArchiveRootsByRecency } from "../domain/outline";
 import { isValidTimeZone, zonedCalendarDate, zonedNoon } from "../domain/timeZone";
+import { DEFAULT_COMPLETION_MODE } from "../domain/recurrence";
 
 export type FlowCalls = {
   query: (path: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -445,7 +446,7 @@ const ROUTE_LABELS: Record<string, string> = {
 
 export async function completeItem(flow: FlowCalls, input: { nodeId: string; mode?: "dueDate" | "today" }) {
   const s = await settings(flow);
-  const completionMode = input.mode ?? s.completionMode ?? "dueDate";
+  const completionMode = input.mode ?? s.completionMode ?? DEFAULT_COMPLETION_MODE;
   const detail = await loadDetail(flow, input.nodeId);
   if (detail.node.archived) return "That item is archived (completed planner and task-page items are); nothing changed.";
   if (detail.page.archived) refuse("That item is on an archived page.");
@@ -693,7 +694,7 @@ export function registerFlowTools(server: McpServer, flow: FlowCalls, onError: (
         "Returns an undo receipt id for undo_complete.",
       inputSchema: {
         nodeId: id("Item to complete."),
-        mode: z.enum(["dueDate", "today"]).optional().describe("How a recurring task without its own basis rolls forward; default: the workspace setting."),
+        mode: z.enum(["dueDate", "today"]).optional().describe("How a recurring task without its own basis rolls forward; default: the workspace setting, else today."),
       },
       annotations: write,
     },

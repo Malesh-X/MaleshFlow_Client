@@ -23,6 +23,10 @@ export type CustomRecurrenceFrequency = {
 export type RecurrenceFrequency = RecurrencePreset | CustomRecurrenceFrequency | null;
 export type RecurringCompletionMode = "dueDate" | "today";
 
+// The basis used when neither the task nor the workspace sets one: repeat from
+// the day the task is completed.
+export const DEFAULT_COMPLETION_MODE: RecurringCompletionMode = "today";
+
 // A recurring item's own completion basis (sourceMeta.recurrenceBasis):
 // "dueDate" advances from its due date, "today" from the day it's completed.
 // Absent means "use the workspace setting".
