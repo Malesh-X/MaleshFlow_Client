@@ -6,6 +6,10 @@ embeddings and AI hooks run exactly as they do for edits made in the UI.
 Prefer it over driving the web app in a browser: one command per change,
 plain-text output with ids you can check.
 
+Agents without a terminal (claude.ai, the Claude apps, ChatGPT) can use the
+hosted MCP server instead; see docs/mcp.md. Its tools share the CLI's
+formatting (`lib/flow`).
+
 Run from the repo root:
 
 ```bash
