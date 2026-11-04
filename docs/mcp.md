@@ -49,7 +49,7 @@ Flow's sign-in page. Claude Code receives the key on `http://localhost:<port>`.
 | Tool | Does | Read-only |
 | --- | --- | --- |
 | `list_pages` | Active pages as `<pageId>  <title>` (CLI `pages`). | yes |
-| `read_page` | A page's outline with ids, `[ ]`/`[x]` tasks and readable links (CLI `tree`). | yes |
+| `read_page` | A page's outline with ids, `[ ]`/`[x]` tasks and readable links (CLI `tree`), in batches (`offset`, `parentId`; see below). | yes |
 | `show_item` | One item: text, page, kind, status, dates, time, recurrence, priority, its parents and children. | yes |
 | `search` | Pages by title and items by text (the app's link search). | yes |
 | `add_item` | Add a note or task (end of the page's main section by default; `parentId`, `afterId`, `task`, `due`, `dueEnd`, `time`, `timeZone`) (CLI `add`). | no |
@@ -59,6 +59,28 @@ Flow's sign-in page. Claude Code receives the key on `http://localhost:<port>`.
 | `complete_item` | Complete like the app's checkbox; returns an undo receipt (CLI `done`). | no |
 | `undo_complete` | Checked undo of a completion by receipt (CLI `undo-done`). | no (marked destructive) |
 | `move_item` | Move an item and its branch, within a page or to another page (CLI `move`). | no |
+
+`read_page` returns at most 450 items, and about 100,000 characters of
+outline, per call, so a whole Today/This Week planner (about 400 items) comes
+back in one read. A longer page is cut between items and ends with a note:
+
+```
+Showing items 1–450 of 1,203. Call read_page with offset=450 for more, or parentId=<id> to read one section.
+Top-level sections:
+- Focus  (…)  84 items
+- …
+```
+
+- `offset` continues from that item. A batch that starts inside a branch first
+  prints `(continuing under: Focus > X)` so the indentation still reads.
+- `parentId` reads one item and everything under it (an item on that page, for
+  example one planner day), batched the same way. On planners this is the
+  cheaper read.
+- Stray items print on the last batch only; the server's load warning prints
+  on every batch. Archive pages (Past Weeks, Done) list newest first, as in the
+  app. The CLI's `tree` is not batched.
+- `show_item` shows at most 500 items under an item; when it's cut it points
+  to `read_page` with `parentId`.
 
 There is no raw `run` tool, no archive or delete, and no tool for settings or
 exclusions.

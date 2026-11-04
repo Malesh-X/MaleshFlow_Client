@@ -25,6 +25,7 @@ import {
   type PageDoc,
   type TreeNode,
 } from "../flow/logic";
+import { shouldOrderArchiveRootsByRecency } from "../domain/outline";
 import { isValidTimeZone, zonedCalendarDate, zonedNoon } from "../domain/timeZone";
 
 export type FlowCalls = {
@@ -94,11 +95,97 @@ function formatRecurrence(value: unknown) {
   return interval && unit ? `every ${interval} ${unit}${interval === 1 ? "" : "s"}` : JSON.stringify(value);
 }
 
-export async function renderPage(flow: FlowCalls, pageId: string) {
-  const tree = await loadTree(flow, pageId);
-  const lookup = await links(flow, tree.nodes.map((node) => node.text));
-  const lines = [`# ${tree.page.title}  (page ${tree.page._id})`, ...outlineLines(tree.nodes, lookup)];
-  const strays = findStrayNodes(tree.nodes);
+// read_page batches: at most this many items, and about this many characters
+// of outline, per call (a whole Today/This Week planner fits in one).
+export const READ_PAGE_MAX_ITEMS = 450;
+export const READ_PAGE_MAX_CHARS = 100_000;
+const SECTION_LIST_LIMIT = 40;
+
+type OutlineEntry = { node: TreeNode; depth: number; path: TreeNode[]; size: number };
+
+// When an archive item was added (like the app's recency order for Past Weeks).
+const addedAt = (node: TreeNode & { createdAt?: number; _creationTime?: number }) => {
+  const archivedAt = node.sourceMeta?.archivedAt;
+  if (typeof archivedAt === "number" && Number.isFinite(archivedAt)) return archivedAt;
+  return node.createdAt ?? node._creationTime ?? node.position;
+};
+
+// The printed outline as a flat list in print order, each entry with its
+// ancestors and subtree size. Top-level items of archive pages (Past Weeks,
+// Done) come newest first, as in the app.
+function outlineEntries(nodes: TreeNode[], page: PageDoc, rootId: string | null) {
+  const byParent = new Map<string | null, TreeNode[]>();
+  for (const node of nodes.filter((n) => !n.archived)) {
+    const list = byParent.get(node.parentNodeId) ?? [];
+    list.push(node);
+    byParent.set(node.parentNodeId, list);
+  }
+  const recency = shouldOrderArchiveRootsByRecency(page);
+  const childrenOf = (parent: string | null) => {
+    const list = [...(byParent.get(parent) ?? [])].sort((a, b) => a.position - b.position);
+    if (parent === null && recency) list.sort((a, b) => addedAt(b) - addedAt(a) || b.position - a.position);
+    return list;
+  };
+  const entries: OutlineEntry[] = [];
+  const seen = new Set<string>();
+  const visit = (node: TreeNode, depth: number, path: TreeNode[]) => {
+    if (seen.has(node._id)) return;
+    seen.add(node._id);
+    const entry = { node, depth, path, size: 0 };
+    entries.push(entry);
+    const before = entries.length;
+    for (const child of childrenOf(node._id)) visit(child, depth + 1, [...path, node]);
+    entry.size = entries.length - before + 1;
+  };
+  if (rootId === null) for (const node of childrenOf(null)) visit(node, 0, []);
+  else visit(nodes.find((n) => n._id === rootId)!, 0, []);
+  return entries;
+}
+
+const count = (n: number) => n.toLocaleString("en-US");
+const short = (text: string, max = 60) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+export async function renderPage(flow: FlowCalls, pageIdOrInput: string | { pageId: string; offset?: number; parentId?: string }) {
+  const input = typeof pageIdOrInput === "string" ? { pageId: pageIdOrInput } : pageIdOrInput;
+  const offset = input.offset ?? 0;
+  if (!Number.isInteger(offset) || offset < 0) refuse("offset must be a whole number, 0 or more.");
+  const tree = await loadTree(flow, input.pageId);
+  const parentId = input.parentId || null;
+  if (parentId && !tree.nodes.some((n) => n._id === parentId && !n.archived)) {
+    refuse("parentId must be an active item on this page (use show_item for an item elsewhere).");
+  }
+  const entries = outlineEntries(tree.nodes, tree.page, parentId);
+  if (offset > 0 && offset >= entries.length) refuse(`offset ${offset} is past the end; there are ${count(entries.length)} items.`);
+
+  let end = offset;
+  let chars = 0;
+  // Size by plain text first, then render the chosen slice with links.
+  while (end < entries.length && end - offset < READ_PAGE_MAX_ITEMS) {
+    const entry = entries[end];
+    const length = outlineLine(entry.node, entry.depth, null).length + 1;
+    if (end > offset && chars + length > READ_PAGE_MAX_CHARS) break;
+    chars += length;
+    end += 1;
+  }
+  const batch = entries.slice(offset, end);
+  const isLast = end >= entries.length;
+  const strays = !parentId && isLast ? findStrayNodes(tree.nodes) : [];
+  const continuing = offset > 0 && batch[0]?.path.length ? batch[0].path : [];
+  const above = parentId ? ancestorsOf(tree.nodes, parentId) : [];
+  const sections = isLast ? [] : entries.filter((e) => e.depth === (parentId ? 1 : 0));
+  const lookup = await links(flow, [
+    ...batch.map((e) => e.node.text),
+    ...continuing.map((n) => n.text),
+    ...above.map((n) => n.text),
+    ...sections.slice(0, SECTION_LIST_LIMIT).map((e) => e.node.text),
+    // Stray subtrees print whole, so their texts may be anywhere on the page.
+    ...(strays.length ? tree.nodes.filter((n) => !n.archived).map((n) => n.text) : []),
+  ]);
+
+  const lines = [`# ${tree.page.title}  (page ${tree.page._id})`];
+  if (above.length) lines.push(`(under: ${above.map((n) => short(displayText(n.text, lookup))).join(" > ")})`);
+  if (continuing.length) lines.push(`(continuing under: ${continuing.map((n) => short(displayText(n.text, lookup))).join(" > ")})`);
+  for (const entry of batch) lines.push(outlineLine(entry.node, entry.depth, lookup));
   if (strays.length) {
     lines.push("", `## Stray items (${strays.length}): active, but their parent is archived, missing or on another page`);
     for (const node of strays) {
@@ -106,8 +193,38 @@ export async function renderPage(flow: FlowCalls, pageId: string) {
       lines.push(...outlineLines(tree.nodes, lookup, node._id, 1));
     }
   }
+  if (!isLast) {
+    const target = parentId ? `pageId=${tree.page._id}, parentId=${parentId}, offset=${end}` : `offset=${end}`;
+    lines.push(
+      "",
+      `Showing items ${count(offset + 1)}–${count(end)} of ${count(entries.length)}. ` +
+        `Call read_page with ${target} for more, or parentId=<id> to read one section.`,
+    );
+    if (sections.length) {
+      lines.push(parentId ? "Sections in this item:" : "Top-level sections:");
+      for (const entry of sections.slice(0, SECTION_LIST_LIMIT)) {
+        lines.push(`- ${short(displayText(entry.node.text, lookup))}  (${entry.node._id})  ${count(entry.size)} item${entry.size === 1 ? "" : "s"}`);
+      }
+      if (sections.length > SECTION_LIST_LIMIT) lines.push(`…and ${count(sections.length - SECTION_LIST_LIMIT)} more.`);
+    }
+  }
   if (tree.loadWarning) lines.push("", `Note: ${tree.loadWarning}`);
   return lines.join("\n");
+}
+
+// An item's ancestors on its page, outermost first.
+function ancestorsOf(nodes: TreeNode[], nodeId: string) {
+  const byId = new Map(nodes.map((n) => [n._id, n]));
+  const path: TreeNode[] = [];
+  const seen = new Set([nodeId]);
+  let parent = byId.get(nodeId)?.parentNodeId ?? null;
+  while (parent && !seen.has(parent) && byId.has(parent)) {
+    seen.add(parent);
+    const node = byId.get(parent)!;
+    path.unshift(node);
+    parent = node.parentNodeId;
+  }
+  return path;
 }
 
 export async function renderItem(flow: FlowCalls, nodeId: string) {
@@ -137,7 +254,7 @@ export async function renderItem(flow: FlowCalls, nodeId: string) {
   }
   const children = outlineLines(detail.nodes, lookup, node._id, 0);
   if (children.length) lines.push("", "Children:", ...children);
-  if (detail.truncated) lines.push("", "Note: the item's subtree is large; only part of it is shown.");
+  if (detail.truncated) lines.push("", `Note: the item's subtree is large; only part of it is shown. Call read_page with pageId=${page._id}, parentId=${node._id} to read all of it in batches.`);
   return lines.join("\n");
 }
 
@@ -448,11 +565,18 @@ export function registerFlowTools(server: McpServer, flow: FlowCalls, onError: (
       title: "Read a page",
       description:
         "Print a page's outline: one line per active item, indented by nesting, with `[ ]`/`[x]` for tasks and each item's id in parentheses. " +
+        `Returns at most ${READ_PAGE_MAX_ITEMS} items per call; a longer page ends with a note giving the total, the offset to continue from and the top-level section ids. ` +
+        "Pass offset to continue, or parentId to read one item and everything under it (also batched). " +
+        "On planner pages, reading one day or section by parentId is cheaper than the whole page. " +
         LINKS_NOTE,
-      inputSchema: { pageId: id("Page id from list_pages or search.") },
+      inputSchema: {
+        pageId: id("Page id from list_pages or search."),
+        offset: z.number().int().min(0).optional().describe("Continue from this item (the offset a cut-off read_page gave). Default 0."),
+        parentId: z.string().optional().describe("Read only this item and its subtree (an item id on this page, e.g. a planner day)."),
+      },
       annotations: read,
     },
-    run((f, input: { pageId: string }) => renderPage(f, input.pageId)),
+    run((f, input: { pageId: string; offset?: number; parentId?: string }) => renderPage(f, input)),
   );
   server.registerTool(
     "show_item",
