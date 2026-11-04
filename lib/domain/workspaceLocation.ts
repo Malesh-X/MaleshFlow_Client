@@ -13,6 +13,7 @@ export type WorkspacePaletteMode =
   | "overdueTasks"
   | "waitingTasks"
   | "dataDumpExclusions"
+  | "connectedAgents"
   | "taskSchedule"
   | "noteDate";
 
@@ -44,6 +45,7 @@ const PALETTE_PANEL_SLUG_BY_MODE: Record<WorkspacePaletteMode, string> = {
   overdueTasks: "past-due",
   waitingTasks: "waiting",
   dataDumpExclusions: "data-dump-exclusions",
+  connectedAgents: "connected-agents",
   taskSchedule: "task-schedule",
   noteDate: "note-date",
 };

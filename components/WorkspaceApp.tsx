@@ -377,6 +377,13 @@ type DataDumpExclusionsResult = {
     alsoCoveredBy: "page" | "ancestor" | null;
   }>;
 };
+type ConnectedAgent = {
+  grantId: Id<"oauthGrants">;
+  clientName: string;
+  redirectHost: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+};
 type DataDumpExclusionRow =
   | { kind: "page"; key: string; page: PageDoc }
   | {
@@ -2090,6 +2097,8 @@ function getPaletteDocumentTitle(mode: PaletteMode): string {
       return "Waiting Tasks";
     case "dataDumpExclusions":
       return "Data Dump Exclusions";
+    case "connectedAgents":
+      return "Connected Agents";
     case "taskSchedule":
       return "Task Schedule";
     case "noteDate":
@@ -4001,6 +4010,13 @@ function ConfiguredWorkspace({
       ? { ownerKey }
       : SKIP,
   ) as DataDumpExclusionsResult | undefined;
+  const connectedAgentsQueryResult = useQuery(
+    api.oauth.listConnectedAgents,
+    ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "connectedAgents"
+      ? { ownerKey }
+      : SKIP,
+  ) as ConnectedAgent[] | undefined;
+  const revokeConnectedAgentMutation = useMutation(api.oauth.revokeConnectedAgent);
 
   const recomputePendingSyncSnapshot = useCallback(() => {
     const nodeIds = new Set<string>();
@@ -6468,6 +6484,16 @@ function ConfiguredWorkspace({
       ).some((value) => value.toLowerCase().includes(normalizedQuery)),
     );
   }, [dataDumpExclusionsQueryResult, pagesById, pagesByTitle, paletteQuery]);
+  const connectedAgentRows = useMemo(() => {
+    const rows = connectedAgentsQueryResult ?? [];
+    const normalizedQuery = paletteQuery.trim().toLowerCase();
+    if (normalizedQuery.length === 0) {
+      return rows;
+    }
+    return rows.filter((row) =>
+      [row.clientName, row.redirectHost].some((value) => value.toLowerCase().includes(normalizedQuery)),
+    );
+  }, [connectedAgentsQueryResult, paletteQuery]);
   const embeddingProgressLabel = useMemo(() => {
     if (!embeddingRebuildProgress) {
       return shouldTrackEmbeddingRebuild ? "Embedding status unavailable." : "";
@@ -8555,6 +8581,18 @@ function ConfiguredWorkspace({
         },
       },
       {
+        key: "show-connected-agents",
+        title: "Show Connected Agents",
+        subtitle:
+          "See the agents connected over MCP (Claude, ChatGPT, Claude Code), when each was last used, and revoke one.",
+        keywords: ["mcp", "agents", "connected", "claude", "chatgpt", "oauth", "revoke", "connector", "access"],
+        actionLabel: "Open",
+        onSelect: () => {
+          switchPaletteMode("connectedAgents");
+          setPaletteOpen(true);
+        },
+      },
+      {
         key: "toggle-children-link-autocomplete",
         title: isLinkAutocompleteContextHidden
           ? "Show Children In Link Autocomplete"
@@ -9006,6 +9044,8 @@ function ConfiguredWorkspace({
         ? waitingTaskResults.length
       : paletteMode === "dataDumpExclusions"
         ? dataDumpExclusionRows.length
+      : paletteMode === "connectedAgents"
+        ? connectedAgentRows.length
         : paletteMode === "actions"
             ? actionResults.length
             : 0;
@@ -11592,6 +11632,11 @@ function ConfiguredWorkspace({
         if (highlighted) {
           openDataDumpExclusionRow(highlighted);
         }
+        return;
+      }
+
+      // Revoking takes a click on the row's Revoke button, never Enter.
+      if (paletteMode === "connectedAgents") {
         return;
       }
 
@@ -14198,6 +14243,17 @@ function ConfiguredWorkspace({
                     Dump Exclusions
                   </button>
                 ) : null}
+                {paletteMode === "connectedAgents" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      switchPaletteMode("connectedAgents");
+                    }}
+                    className="border border-[var(--workspace-brand)] bg-[var(--workspace-brand)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--workspace-inverse-text)] transition"
+                  >
+                    Connected Agents
+                  </button>
+                ) : null}
                 {paletteMode === "archive" ? (
                   <button
                     type="button"
@@ -14356,6 +14412,8 @@ function ConfiguredWorkspace({
                               ? "Filter waiting tasks..."
                             : paletteMode === "dataDumpExclusions"
                               ? "Filter excluded pages and items..."
+                            : paletteMode === "connectedAgents"
+                              ? "Filter connected agents..."
                               : "Run a workspace action..."
                     }
                     className="w-full border-0 bg-transparent p-0 text-lg outline-none"
@@ -14704,6 +14762,61 @@ function ConfiguredWorkspace({
                         }
                       >
                         Include
+                      </button>
+                    </div>
+                  );
+                })
+              ) : paletteMode === "connectedAgents" ? typeof connectedAgentsQueryResult === "undefined" ? (
+                <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
+                  Loading connected agents...
+                </p>
+              ) : connectedAgentRows.length === 0 ? (
+                <p className="px-5 py-4 text-sm text-[var(--workspace-text-subtle)]">
+                  {paletteQuery.trim().length > 0
+                    ? "No matching agents."
+                    : "No agents are connected. Add Flow as a connector at https://flow.malesh.com/api/mcp (see docs/mcp.md)."}
+                </p>
+              ) : (
+                connectedAgentRows.map((row, index) => {
+                  const subtitle = [
+                    row.redirectHost,
+                    `Connected ${new Date(row.createdAt).toLocaleString()}`,
+                    row.lastUsedAt ? `Last used ${new Date(row.lastUsedAt).toLocaleString()}` : "Not used yet",
+                  ].join(" • ");
+                  return (
+                    <div
+                      key={row.grantId}
+                      data-palette-item-index={index}
+                      onMouseEnter={() => setPaletteHighlightIndex(index)}
+                      className={clsx(
+                        "flex w-full items-start justify-between gap-3 px-5 py-3 transition",
+                        index === paletteHighlightIndex
+                          ? "bg-[var(--workspace-sidebar-bg)]"
+                          : "hover:bg-[var(--workspace-surface-hover)]",
+                      )}
+                    >
+                      <span className="min-w-0 flex-1 text-left">
+                        <span className="block truncate text-sm font-medium text-[var(--workspace-text)]">
+                          {row.clientName}
+                        </span>
+                        <span className="mt-1 block text-[11px] uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                          {subtitle}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!ownerKey) {
+                            return;
+                          }
+                          void revokeConnectedAgentMutation({ ownerKey, grantId: row.grantId })
+                            .then(() => setCopySnackbarMessage(`Revoked ${row.clientName}`))
+                            .catch(() => undefined);
+                        }}
+                        className="shrink-0 rounded-full border border-[var(--workspace-brand)] px-2 py-1 text-[11px] uppercase tracking-[0.14em] text-[var(--workspace-brand)] transition hover:bg-[var(--workspace-brand)] hover:text-[var(--workspace-inverse-text)]"
+                        title="Revoke this agent's access; it stops working on its next request"
+                      >
+                        Revoke
                       </button>
                     </div>
                   );
