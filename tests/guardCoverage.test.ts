@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXEMPT_MUTATIONS, GUARDED_MUTATIONS, GUARD_FUNCTION_NAMES } from "../convex/lib/guardRegistry";
+import { AGENT_FUNCTIONS, AGENT_HIDING_FUNCTION_NAMES, type AgentEntry } from "../convex/lib/agentRegistry";
 
 // Tests run from the repo root (npm test).
 const convexDir = join(process.cwd(), "convex");
@@ -69,4 +70,76 @@ test("every guarded mutation calls a guard", () => {
     for (const [index, body] of viaBodies.entries()) assert.ok(body.length > 0, `${name}: helper ${entry.via![index]} not found`);
     assert.ok(callsGuard(block) || viaBodies.some(callsGuard), `${name} is listed as guarded but calls no guard`);
   }
+});
+
+// ---- agent tokens (convex/lib/agentRegistry.ts) ----
+
+// Every public query, mutation and action, by "module:name".
+function publicBlocks() {
+  const blocks = new Map<string, string>();
+  for (const [module, source] of Object.entries(sources)) {
+    const matches = [...source.matchAll(/^export const (\w+) = (mutation|internalMutation|query|internalQuery|action|internalAction|httpAction)\(/gm)];
+    matches.forEach((match, index) => {
+      if (!["mutation", "query", "action"].includes(match[2])) return;
+      const end = matches[index + 1]?.index ?? source.length;
+      blocks.set(`${module}:${match[1]}`, source.slice(match.index, end));
+    });
+  }
+  return blocks;
+}
+
+// Public functions that take no owner key at all: the OAuth endpoints
+// (each checks its own code, token or the owner key) and the owner-key check.
+const NO_OWNER_KEY = new Set([
+  "oauth:registerClient",
+  "oauth:getClient",
+  "oauth:approve",
+  "oauth:exchangeCode",
+  "oauth:refresh",
+  "oauth:authenticate",
+  "workspace:validateOwnerKey",
+  "workspace:checkOwnerKey",
+]);
+const OWNER_KEY_CHECK = /assertOwnerKey(Guarded|GuardedInAction)?\(/;
+
+test("only allowlisted functions accept agent tokens, each under its own name", () => {
+  const blocks = publicBlocks();
+  for (const [name, block] of blocks) {
+    const calls = [...block.matchAll(/authorizeCaller\([^,]+,[^,]+,\s*"([^"]+)"\)/g)].map((match) => match[1]);
+    if (name in AGENT_FUNCTIONS) {
+      assert.deepEqual(calls, [name], `${name} must call authorizeCaller once with its own name`);
+      assert.ok(!OWNER_KEY_CHECK.test(block), `${name} must check its caller with authorizeCaller only`);
+    } else {
+      assert.ok(!block.includes("authorizeCaller("), `${name} accepts agent tokens but isn't in AGENT_FUNCTIONS`);
+    }
+  }
+  const stale = Object.keys(AGENT_FUNCTIONS).filter((name) => !blocks.has(name));
+  assert.deepEqual(stale, [], `Not public functions (remove from AGENT_FUNCTIONS): ${stale.join(", ")}`);
+});
+
+test("every function that accepts agent tokens applies the data dump hiding rule", () => {
+  const blocks = publicBlocks();
+  for (const [name, entry] of Object.entries(AGENT_FUNCTIONS) as [string, AgentEntry][]) {
+    if (entry.noContent) continue;
+    const block = blocks.get(name) ?? "";
+    assert.ok(
+      AGENT_HIDING_FUNCTION_NAMES.some((helper) => block.includes(`${helper}(`)),
+      `${name} accepts agent tokens but calls none of ${AGENT_HIDING_FUNCTION_NAMES.join(", ")}`,
+    );
+  }
+});
+
+test("every other public function checks the owner key, which refuses agent tokens", () => {
+  for (const [name, block] of publicBlocks()) {
+    if (name in AGENT_FUNCTIONS || NO_OWNER_KEY.has(name)) continue;
+    assert.ok(OWNER_KEY_CHECK.test(block), `${name} doesn't check the owner key`);
+  }
+  const auth = readFileSync(join(convexDir, "lib", "auth.ts"), "utf8");
+  assert.ok(/if \(isAgentCredential\(ownerKey\)\) \{\s*throw/.test(auth), "assertOwnerKey must refuse agent tokens first");
+});
+
+test("agents can't change exclusions, settings, auth or tokens, or delete pages", () => {
+  const forbidden = /DataDumpExcluded|setWorkspaceSettings|OwnerKey|^oauth:|delete|Forever|archivePage|setNodeTreeArchived|rebuildEmbeddings/;
+  const allowed = Object.keys(AGENT_FUNCTIONS).filter((name) => forbidden.test(name));
+  assert.deepEqual(allowed, []);
 });

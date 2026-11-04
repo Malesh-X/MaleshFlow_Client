@@ -100,6 +100,12 @@ export const EXEMPT_MUTATIONS: Record<string, string> = {
   "migrationData:updateMigrationLessonsDoc": "Import/migration bookkeeping (lessons doc).",
   "migrationData:abandonMigrationRun": "Import/migration run state only.",
   "migrationData:skipMigrationChunk": "Import/migration chunk state only.",
+  "oauth:registerClient": "Agent OAuth client registration only; writes no pages or items.",
+  "oauth:approve": "Agent OAuth: checks the owner key (with the lockout) and issues a code; writes no pages or items.",
+  "oauth:exchangeCode": "Agent OAuth token endpoint (authorization_code); writes only code and token rows.",
+  "oauth:refresh": "Agent OAuth token endpoint (refresh_token); writes only token rows.",
+  "oauth:authenticate": "Agent OAuth: records when a token was last used; writes no pages or items.",
+  "oauth:revokeConnectedAgent": "Owner only: revokes an agent's grant and tokens; writes no pages or items.",
 };
 
 export const GUARD_FUNCTION_NAMES = ["assertNodeEditable", "assertValidParent", "assertPageWritable", "normalizeSchedule"] as const;

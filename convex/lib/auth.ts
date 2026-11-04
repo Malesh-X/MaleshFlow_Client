@@ -1,3 +1,5 @@
+import { isAgentCredential } from "../../lib/domain/agentOAuth";
+
 export function isOwnerKeyConfigured() {
   return Boolean(process.env.OWNER_ACCESS_TOKEN);
 }
@@ -11,10 +13,15 @@ export function isOwnerKeyValid(ownerKey: string) {
     return false;
   }
 
-  return ownerKey === configuredOwnerKey;
+  return !isAgentCredential(ownerKey) && ownerKey === configuredOwnerKey;
 }
 
 export function assertOwnerKey(ownerKey: string) {
+  // Agent tokens only work with the functions in convex/lib/agentRegistry.ts,
+  // which check them with authorizeCaller instead.
+  if (isAgentCredential(ownerKey)) {
+    throw new Error("Agent tokens can't call this function.");
+  }
   if (!isOwnerKeyConfigured()) {
     throw new Error(
       "OWNER_ACCESS_TOKEN is not configured on this deployment; access is disabled until it is set.",

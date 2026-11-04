@@ -13,7 +13,17 @@ import {
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isOwnerKeyValid } from "./lib/auth";
-import { listDataDumpExclusions as collectDataDumpExclusions, isDataDumpExcluded } from "../lib/domain/dataDump";
+import { authorizeCaller } from "./lib/agentAuth";
+import {
+  agentRefuseLanding,
+  agentRefuseNodes,
+  agentRefusePage,
+  agentRefuseReceipts,
+  agentVisiblePages,
+  agentVisibleTree,
+  createHiddenChecker,
+} from "./lib/agentVisibility";
+import { listDataDumpExclusions as collectDataDumpExclusions, filterDataDumpNodes, isDataDumpExcluded } from "../lib/domain/dataDump";
 import {
   assertOwnerKeyGuarded,
   isAuthLocked,
@@ -2123,7 +2133,7 @@ export const listPages = query({
     includeArchived: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:listPages");
     if (args.includeArchived) {
       const [activePages, archivedPages] = await Promise.all([
         ctx.db
@@ -2140,19 +2150,19 @@ export const listPages = query({
           .collect(),
       ]);
 
-      return [...activePages, ...archivedPages].filter(
+      return agentVisiblePages(caller, [...activePages, ...archivedPages].filter(
         (page) => !isSidebarSpecialPage(page) && !isPagePendingDeletion(page),
-      );
+      ));
     }
 
-    return (await ctx.db
+    return agentVisiblePages(caller, (await ctx.db
       .query("pages")
       .withIndex("by_archived_position", (query) =>
         query.eq("archived", false),
       )
       .collect()).filter(
       (page) => !isSidebarSpecialPage(page) && !isPagePendingDeletion(page),
-    );
+    ));
   },
 });
 
@@ -2287,7 +2297,7 @@ export const getWorkspaceSettings = query({
     ownerKey: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await authorizeCaller(ctx.db, args.ownerKey, "workspace:getWorkspaceSettings");
     return await readWorkspaceSettings(ctx.db);
   },
 });
@@ -2723,14 +2733,64 @@ export const getPageTree = query({
     pageId: v.id("pages"),
   },
   handler: async (ctx, args) => {
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:getPageTree");
 
     const page = await ctx.db.get(args.pageId);
     if (!page || isPagePendingDeletion(page)) {
       return null;
     }
 
-    return await buildPageTreeResult(ctx, page);
+    // Agents: null for an excluded page, no excluded items or backlinks.
+    if (caller.kind === "agent" && isDataDumpExcluded(page)) {
+      return null;
+    }
+    return agentVisibleTree(caller, await buildPageTreeResult(ctx, page, { includeBacklinkMetadata: caller.kind !== "agent" }));
+  },
+});
+
+// One item with its page, its ancestors (outermost first) and its active
+// subtree (capped), for the MCP server's show tool. Null when the item is
+// missing, or hidden from an agent (excluded from data dumps, or under or on
+// something that is); an agent also gets no excluded children and no text
+// for hidden ancestors.
+export const getNodeDetail = query({
+  args: {
+    ownerKey: v.string(),
+    nodeId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:getNodeDetail");
+    const nodeId = ctx.db.normalizeId("nodes", args.nodeId);
+    const node = nodeId ? await ctx.db.get(nodeId) : null;
+    const page = node ? await ctx.db.get(node.pageId) : null;
+    if (!node || !page || isPagePendingDeletion(page)) {
+      return null;
+    }
+    const hidden = createHiddenChecker(ctx.db);
+    if (caller.kind === "agent" && (await hidden.isNodeHidden(node))) {
+      return null;
+    }
+    const ancestors: { _id: Id<"nodes">; text: string; archived: boolean }[] = [];
+    const seen = new Set<string>([node._id]);
+    let parentId = node.parentNodeId;
+    while (parentId && !seen.has(parentId) && ancestors.length < 50) {
+      seen.add(parentId);
+      const parent = await hidden.getNode(parentId);
+      if (!parent || parent.pageId !== node.pageId) break;
+      ancestors.unshift({ _id: parent._id, text: parent.text, archived: parent.archived });
+      parentId = parent.parentNodeId;
+    }
+    const subtree = node.archived
+      ? { nodes: [node], truncated: false }
+      : await collectNodeTreeForTreeWithCaps(ctx, node, 500, MAX_PAGE_TREE_NODE_TEXT_CHARS);
+    const visible = caller.kind === "agent" ? filterDataDumpNodes(subtree.nodes).nodes : subtree.nodes;
+    return {
+      node,
+      page,
+      ancestors,
+      nodes: visible.length ? visible : [node],
+      truncated: subtree.truncated,
+    };
   },
 });
 
@@ -3714,7 +3774,7 @@ export const searchLinkTargets = query({
     preferTemplatePages: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:searchLinkTargets");
 
     const normalizedQuery = normalizeLinkSearchQuery(args.query);
     const limit = Math.max(1, Math.min(args.limit ?? 12, 24));
@@ -3734,9 +3794,10 @@ export const searchLinkTargets = query({
         : []),
     ]);
     const pages = pageBatches.flat();
-    const visiblePages = pages.filter(
+    const visiblePages = agentVisiblePages(caller, pages.filter(
       (page) => !isSidebarSpecialPage(page) && !isPagePendingDeletion(page),
-    );
+    ));
+    const hidden = createHiddenChecker(ctx.db);
 
     const pageResults = [...visiblePages]
       .filter((page) => linkSearchScore(page.title, normalizedQuery) !== Number.POSITIVE_INFINITY)
@@ -3865,6 +3926,10 @@ export const searchLinkTargets = query({
         break;
       }
       if (await isHiddenByAncestor(node)) {
+        continue;
+      }
+      // Agents: no items excluded from data dumps (or under one).
+      if (caller.kind === "agent" && (await hidden.isExcludedByItem(node))) {
         continue;
       }
       nodeResults.push({
@@ -4059,7 +4124,6 @@ export const resolvePageLinks = query({
 // missing targets come back without text. Ids are strings so a malformed id
 // in stored text reads as missing instead of failing the call.
 const MAX_LINK_TARGETS = 500;
-const MAX_LINK_TARGET_ANCESTOR_DEPTH = 100;
 export const resolveLinkTargets = query({
   args: {
     ownerKey: v.string(),
@@ -4067,45 +4131,15 @@ export const resolveLinkTargets = query({
     pageIds: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    await authorizeCaller(ctx.db, args.ownerKey, "workspace:resolveLinkTargets");
     const nodeRefs = [...new Set(args.nodeIds)];
     const pageRefs = [...new Set(args.pageIds)];
     if (nodeRefs.length + pageRefs.length > MAX_LINK_TARGETS) {
       throw new ConvexError(`Too many link targets in one call (max ${MAX_LINK_TARGETS}).`);
     }
 
-    const pageCache = new Map<string, Doc<"pages"> | null>();
-    const getPage = async (pageId: Id<"pages">) => {
-      if (!pageCache.has(pageId)) pageCache.set(pageId, await ctx.db.get(pageId));
-      return pageCache.get(pageId) ?? null;
-    };
-    const nodeCache = new Map<string, Doc<"nodes"> | null>();
-    const getNode = async (nodeId: Id<"nodes">) => {
-      if (!nodeCache.has(nodeId)) nodeCache.set(nodeId, await ctx.db.get(nodeId));
-      return nodeCache.get(nodeId) ?? null;
-    };
     // Same rule as getDataDumpVisibility: an excluded item hides its subtree.
-    const hiddenByAncestor = new Map<string, boolean>();
-    const isExcludedNode = async (node: Doc<"nodes">): Promise<boolean> => {
-      const chain: string[] = [];
-      let current: Doc<"nodes"> | null = node;
-      let result = false;
-      for (let depth = 0; current && depth < MAX_LINK_TARGET_ANCESTOR_DEPTH; depth += 1) {
-        const known = hiddenByAncestor.get(current._id);
-        if (known !== undefined) {
-          result = known;
-          break;
-        }
-        chain.push(current._id);
-        if (isDataDumpExcluded(current)) {
-          result = true;
-          break;
-        }
-        current = current.parentNodeId ? await getNode(current.parentNodeId) : null;
-      }
-      for (const id of chain) hiddenByAncestor.set(id, result);
-      return result;
-    };
+    const { getPage, getNode, isExcludedByItem: isExcludedNode } = createHiddenChecker(ctx.db);
 
     const nodes = await Promise.all(
       nodeRefs.map(async (ref) => {
@@ -5377,7 +5411,9 @@ export const setNodeCompletion = mutation({
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:setNodeCompletion");
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:setNodeCompletion");
+    await agentRefuseNodes(ctx.db, caller, [args.nodeId]);
+    await agentRefusePage(ctx.db, caller, args.plannerPageId);
     const result = await runWithReceipt(
       ctx,
       {
@@ -5412,7 +5448,8 @@ export const setRecurrenceBasis = mutation({
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:setRecurrenceBasis");
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:setRecurrenceBasis");
+    await agentRefuseNodes(ctx.db, caller, [args.nodeId]);
     const node = await assertNodeEditable(ctx, args.nodeId, "schedule");
     if (!node) {
       throw new ConvexError("Item not found.");
@@ -5482,7 +5519,8 @@ export const undoCompletion = mutation({
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:undoCompletion");
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:undoCompletion");
+    await agentRefuseReceipts(ctx.db, caller, args.receiptIds);
     const results = [];
     for (const receiptId of args.receiptIds) {
       results.push(await undoStoredReceipt(ctx, receiptId));
@@ -5966,7 +6004,9 @@ export const createNodesBatch = mutation({
           ),
         }
       : rawArgs;
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:createNodesBatch");
+    await agentRefusePage(ctx.db, caller, args.pageId);
+    await agentRefuseNodes(ctx.db, caller, args.nodes.flatMap((entry) => [entry.parentNodeId, entry.afterNodeId]));
     const now = getTimestamp();
     const createdNodes: Doc<"nodes">[] = [];
     let lastCreatedId: Id<"nodes"> | null = null;
@@ -6058,6 +6098,9 @@ export const createNodesBatch = mutation({
 
     await enqueuePageRootEmbeddingRefresh(ctx, args.pageId);
 
+    // Agents: refuse (and roll back) items that landed hidden, e.g. under an
+    // excluded default section.
+    await agentRefuseLanding(ctx.db, caller, createdNodes.map((node) => node._id));
     return createdNodes;
   },
 });
@@ -6210,7 +6253,8 @@ export const updateNode = mutation({
   },
   handler: async (rawCtx, { ownerKey, ...args }) => {
     const ctx = withGuards(rawCtx, "workspace:updateNode");
-    await assertOwnerKeyGuarded(ctx.db, ownerKey);
+    const caller = await authorizeCaller(ctx.db, ownerKey, "workspace:updateNode");
+    await agentRefuseNodes(ctx.db, caller, [args.nodeId]);
     await applyNodeUpdate(ctx, args);
   },
 });
@@ -6787,7 +6831,9 @@ export const moveNodeTree = mutation({
   },
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:moveNodeTree");
-    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:moveNodeTree");
+    await agentRefuseNodes(ctx.db, caller, [...args.nodeIds, args.parentNodeId, args.afterNodeId]);
+    await agentRefusePage(ctx.db, caller, args.pageId);
     const nodeIds = await topLevelNodeIds(ctx, args.nodeIds);
     const cache = createSiblingListCache();
     const touchedPageIds = new Set<Id<"pages">>();
@@ -6810,6 +6856,8 @@ export const moveNodeTree = mutation({
     for (const pageId of touchedPageIds) {
       await enqueuePageRootEmbeddingRefresh(ctx, pageId);
     }
+    // Agents: refuse (and roll back) a move that left the items hidden.
+    await agentRefuseLanding(ctx.db, caller, nodeIds);
     const first = nodeIds[0] ? await ctx.db.get(nodeIds[0]) : null;
     return { movedNodeIds: nodeIds, pageId: first?.pageId ?? null };
   },

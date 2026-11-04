@@ -387,6 +387,52 @@ export default defineSchema({
       filterFields: ["pageId"],
     }),
 
+  // OAuth for agents (MCP connectors): see convex/oauth.ts and docs/mcp.md.
+  // Codes and tokens are stored only as SHA-256 hashes.
+  oauthClients: defineTable({
+    clientId: v.string(),
+    clientName: v.string(),
+    redirectUris: v.array(v.string()),
+    createdAt: v.number(),
+  }).index("by_clientId", ["clientId"]),
+  // One approval on the sign-in page. Revoking it revokes every token issued
+  // under it. lastUsedAt is updated at most once a minute.
+  oauthGrants: defineTable({
+    clientId: v.string(),
+    clientName: v.string(),
+    redirectHost: v.string(),
+    createdAt: v.number(),
+    lastUsedAt: v.union(v.number(), v.null()),
+    revokedAt: v.union(v.number(), v.null()),
+  }).index("by_revokedAt", ["revokedAt"]),
+  oauthCodes: defineTable({
+    codeHash: v.string(),
+    grantId: v.id("oauthGrants"),
+    clientId: v.string(),
+    clientName: v.string(),
+    redirectUri: v.string(),
+    codeChallenge: v.string(),
+    resource: v.union(v.string(), v.null()),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    lastUsedAt: v.union(v.number(), v.null()),
+    revokedAt: v.union(v.number(), v.null()),
+  }).index("by_codeHash", ["codeHash"]),
+  oauthTokens: defineTable({
+    tokenHash: v.string(),
+    kind: v.union(v.literal("access"), v.literal("refresh")),
+    grantId: v.id("oauthGrants"),
+    clientId: v.string(),
+    clientName: v.string(),
+    resource: v.union(v.string(), v.null()),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    lastUsedAt: v.union(v.number(), v.null()),
+    revokedAt: v.union(v.number(), v.null()),
+  })
+    .index("by_tokenHash", ["tokenHash"])
+    .index("by_grantId", ["grantId"]),
+
   authThrottle: defineTable({
     key: v.string(),
     failedCount: v.number(),
