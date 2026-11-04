@@ -2306,6 +2306,7 @@ export const setWorkspaceSettings = mutation({
   args: {
     ownerKey: v.string(),
     timeZone: v.optional(v.union(v.string(), v.null())),
+    // Deprecated and ignored: older open tabs may still send it.
     completionMode: v.optional(v.union(v.literal("dueDate"), v.literal("today"), v.null())),
   },
   handler: async (rawCtx, args) => {
@@ -2315,10 +2316,7 @@ export const setWorkspaceSettings = mutation({
     if (requestedZone !== null && !isValidTimeZone(requestedZone)) {
       throw new ConvexError(`Unknown time zone "${String(args.timeZone)}".`);
     }
-    return await writeWorkspaceSettings(ctx, {
-      ...(args.timeZone !== undefined ? { timeZone: args.timeZone } : {}),
-      ...(args.completionMode !== undefined ? { completionMode: args.completionMode } : {}),
-    });
+    return await writeWorkspaceSettings(ctx, args.timeZone !== undefined ? { timeZone: args.timeZone } : {});
   },
 });
 
@@ -5486,10 +5484,9 @@ export const forceArchiveTaskPageItem = mutation({
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:forceArchiveTaskPageItem");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    const settings = await readWorkspaceSettings(ctx.db);
     const result = await runWithReceipt(
       ctx,
-      { action: "forceArchive", targetNodeId: args.nodeId, completionMode: settings.completionMode ?? DEFAULT_COMPLETION_MODE },
+      { action: "forceArchive", targetNodeId: args.nodeId, completionMode: DEFAULT_COMPLETION_MODE },
       () => forceArchiveCore(ctx, args.nodeId),
     );
     return { receipt: { ...result.receipt, receiptId: result.receiptId as string }, receiptId: result.receiptId };

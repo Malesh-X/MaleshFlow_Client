@@ -1,15 +1,14 @@
 // Workspace-wide settings, stored on the hidden Sidebar page's sourceMeta
-// (next to the AI memory text): the workspace time zone used for date math,
-// and the default completion mode for recurring items.
+// (next to the AI memory text): the workspace time zone used for date math.
+// Deprecated: sourceMeta.workspaceCompletionMode may still be stored there
+// from older versions; nothing reads or writes it now.
 import type { Doc } from "../_generated/dataModel";
 import type { DatabaseReader, MutationCtx } from "../_generated/server";
 import { isValidTimeZone } from "../../lib/domain/timeZone";
-import type { RecurringCompletionMode } from "../../lib/domain/recurrence";
 import { buildUniquePageSlug } from "./workspace";
 
 export type WorkspaceSettings = {
   timeZone: string | null;
-  completionMode: RecurringCompletionMode | null;
 };
 
 const metaOf = (page: Pick<Doc<"pages">, "sourceMeta"> | null) =>
@@ -23,15 +22,10 @@ async function findSidebarPage(db: DatabaseReader) {
   return pages.find((page) => metaOf(page).specialPage === "sidebar") ?? null;
 }
 
-export function parseCompletionMode(value: unknown): RecurringCompletionMode | null {
-  return value === "dueDate" || value === "today" ? value : null;
-}
-
 export async function readWorkspaceSettings(db: DatabaseReader): Promise<WorkspaceSettings> {
   const meta = metaOf(await findSidebarPage(db));
   return {
     timeZone: isValidTimeZone(meta.workspaceTimeZone) ? meta.workspaceTimeZone : null,
-    completionMode: parseCompletionMode(meta.workspaceCompletionMode),
   };
 }
 
@@ -47,7 +41,6 @@ export async function writeWorkspaceSettings(ctx: MutationCtx, patch: Partial<Wo
   const now = Date.now();
   const next: Record<string, unknown> = {};
   if (patch.timeZone !== undefined) next.workspaceTimeZone = patch.timeZone;
-  if (patch.completionMode !== undefined) next.workspaceCompletionMode = patch.completionMode;
   if (!sidebarPage) {
     await ctx.db.insert("pages", {
       title: "Sidebar",

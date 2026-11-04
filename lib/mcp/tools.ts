@@ -48,7 +48,7 @@ type NodeDetail = {
   nodes: TreeNode[];
   truncated: boolean;
 };
-type Settings = { timeZone: string | null; completionMode: "dueDate" | "today" | null };
+type Settings = { timeZone: string | null };
 
 const NOT_FOUND_ITEM = "Item not found (or it's excluded from data dumps, which agents can't see).";
 const NOT_FOUND_PAGE = "Page not found (or it's excluded from data dumps, which agents can't see).";
@@ -77,7 +77,7 @@ async function settings(flow: FlowCalls): Promise<Settings> {
   try {
     return (await flow.query("workspace:getWorkspaceSettings")) as Settings;
   } catch {
-    return { timeZone: null, completionMode: null };
+    return { timeZone: null };
   }
 }
 
@@ -445,8 +445,8 @@ const ROUTE_LABELS: Record<string, string> = {
 };
 
 export async function completeItem(flow: FlowCalls, input: { nodeId: string; mode?: "dueDate" | "today" }) {
-  const s = await settings(flow);
-  const completionMode = input.mode ?? s.completionMode ?? DEFAULT_COMPLETION_MODE;
+  // A task's own basis wins (server side); then mode; then today.
+  const completionMode = input.mode ?? DEFAULT_COMPLETION_MODE;
   const detail = await loadDetail(flow, input.nodeId);
   if (detail.node.archived) return "That item is archived (completed planner and task-page items are); nothing changed.";
   if (detail.page.archived) refuse("That item is on an archived page.");
@@ -670,7 +670,7 @@ export function registerFlowTools(server: McpServer, flow: FlowCalls, onError: (
       description:
         "Set or clear a task's due date, end date, time and recurrence, and its own completion basis. " +
         "due \"none\" clears the whole schedule. recurrence: daily, weekly, monthly, yearly, <n>d, <n>w, <n>m, <n>y (e.g. 2w), or none. " +
-        "recurrenceBasis is the schedule panel's \"When this task is completed\": dueDate advances from the due date, today from the day it's completed, none uses the workspace setting.",
+        "recurrenceBasis is the schedule panel's \"When this task is completed\": dueDate advances from the due date, today from the day it's completed, none falls back to today.",
       inputSchema: {
         nodeId: id("Task to schedule."),
         due: z.string().optional().describe("YYYY-MM-DD, or none."),
@@ -694,7 +694,7 @@ export function registerFlowTools(server: McpServer, flow: FlowCalls, onError: (
         "Returns an undo receipt id for undo_complete.",
       inputSchema: {
         nodeId: id("Item to complete."),
-        mode: z.enum(["dueDate", "today"]).optional().describe("How a recurring task without its own basis rolls forward; default: the workspace setting, else today."),
+        mode: z.enum(["dueDate", "today"]).optional().describe("How a recurring task without its own basis rolls forward; default: today."),
       },
       annotations: write,
     },

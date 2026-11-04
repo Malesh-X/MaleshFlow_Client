@@ -40,7 +40,7 @@ export function getRecurrenceBasis(item: { sourceMeta?: unknown } | null | undef
 }
 
 // The mode a completion uses for this item: its own basis, else the fallback
-// (the workspace setting the caller sent).
+// (the mode the caller sent: CLI --mode, MCP mode, otherwise "today").
 export function completionModeFor(
   item: { sourceMeta?: unknown } | null | undefined,
   fallback: RecurringCompletionMode,

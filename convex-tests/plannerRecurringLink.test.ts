@@ -27,7 +27,7 @@ afterEach(() => vi.useRealTimers());
 
 async function setup(sourceDueAt: number, frequency: unknown = { interval: 4, unit: "day" }) {
   const t = convexTest(schema, modules);
-  await t.mutation(api.workspace.setWorkspaceSettings, { ownerKey, timeZone: HNL, completionMode: "dueDate" });
+  await t.mutation(api.workspace.setWorkspaceSettings, { ownerKey, timeZone: HNL });
   const get = (id: Id<"nodes">) => t.run((ctx) => ctx.db.get(id)) as Promise<Doc<"nodes">>;
   const all = () => t.run((ctx) => ctx.db.query("nodes").collect());
   const pageId = await t.mutation(api.workspace.createPage, { ownerKey, title: "Plan", sidebarSection: "Tasks", pageType: "planner" });
@@ -57,7 +57,7 @@ async function setup(sourceDueAt: number, frequency: unknown = { interval: 4, un
       return id;
     });
   // The app's checkbox: workspace:setNodeCompletion with the revision it saw.
-  // completionMode is the workspace setting, as the app sends it.
+  // completionMode is the explicit mode argument (CLI --mode, MCP mode).
   const complete = async (nodeId: Id<"nodes">, completionMode: "dueDate" | "today" = "dueDate") =>
     t.mutation(api.workspace.setNodeCompletion, {
       ownerKey, nodeId, intent: "complete", completionMode, expectedRevision: (await get(nodeId)).revision ?? 0,
@@ -132,18 +132,18 @@ describe("the source task's own completion basis", () => {
   // Source due Oct 20, every 4 days; today is Nov 2. "dueDate" -> Nov 5
   // (first date after today on the Oct 20 cadence), "today" -> Nov 6.
   const cases = [
-    { basis: "today" as const, workspace: "dueDate" as const, expected: 6 },
-    { basis: "dueDate" as const, workspace: "today" as const, expected: 5 },
-    { basis: null, workspace: "today" as const, expected: 6 },
-    { basis: null, workspace: "dueDate" as const, expected: 5 },
+    { basis: "today" as const, mode: "dueDate" as const, expected: 6 },
+    { basis: "dueDate" as const, mode: "today" as const, expected: 5 },
+    { basis: null, mode: "today" as const, expected: 6 },
+    { basis: null, mode: "dueDate" as const, expected: 5 },
   ];
-  for (const { basis, workspace, expected } of cases) {
+  for (const { basis, mode, expected } of cases) {
     for (const where of ["day", "focus"] as const) {
-      test(`${where} link, source basis ${basis ?? "unset"}, workspace ${workspace}: next is Nov ${expected}`, async () => {
+      test(`${where} link, source basis ${basis ?? "unset"}, mode ${mode}: next is Nov ${expected}`, async () => {
         const s = await setup(oct(20));
         if (basis) await s.setBasis(basis);
         const copy = await s.copyUnder(where === "day" ? s.days.get(2)! : s.focus, nov(2));
-        await s.complete(copy, workspace);
+        await s.complete(copy, mode);
         expect((await s.get(s.source)).dueAt).toBe(nov(expected));
         expect((await s.activeCopiesUnder(s.days.get(expected)!)).length).toBe(1);
         expect((await s.get(copy)).archived).toBe(true);
@@ -158,7 +158,7 @@ describe("the source task's own completion basis", () => {
     expect((await s.get(s.source)).dueAt).toBe(nov(6));
   });
 
-  test("clearing the basis falls back to the workspace setting", async () => {
+  test("clearing the basis falls back to the mode argument", async () => {
     const s = await setup(oct(20));
     await s.setBasis("today");
     await s.setBasis(null);
@@ -174,5 +174,49 @@ describe("the source task's own completion basis", () => {
     await s.t.mutation(api.workspace.setRecurrenceBasis, { ownerKey, nodeId: copy, basis: "today" });
     await s.complete(copy, "today");
     expect((await s.get(s.source)).dueAt).toBe(nov(5));
+  });
+});
+
+describe("a leftover workspace completionMode is ignored", () => {
+  // Older versions stored workspaceCompletionMode on the Sidebar page. The
+  // app now sends "today" for tasks without their own basis.
+  const storeLeftover = (s: Awaited<ReturnType<typeof setup>>) =>
+    s.t.run(async (ctx) => {
+      const sidebar = (await ctx.db.query("pages").collect()).find((p) => (p.sourceMeta as Meta | undefined)?.specialPage === "sidebar")!;
+      await ctx.db.patch(sidebar._id, { sourceMeta: { ...(sidebar.sourceMeta as Meta), workspaceCompletionMode: "dueDate" } });
+    });
+
+  test("setNodeCompletion on a task without a basis rolls forward from today", async () => {
+    const s = await setup(oct(20));
+    await storeLeftover(s);
+    expect(await s.complete(s.source, "today")).toMatchObject({ route: "recurring" });
+    expect((await s.get(s.source)).dueAt).toBe(nov(6));
+  });
+
+  test("a planner link to a task without a basis rolls the source forward from today", async () => {
+    const s = await setup(oct(20));
+    await storeLeftover(s);
+    const copy = await s.copyUnder(s.days.get(2)!, nov(2));
+    await s.complete(copy, "today");
+    expect((await s.get(s.source)).dueAt).toBe(nov(6));
+  });
+
+  test("a task whose own basis is dueDate still uses its due date", async () => {
+    const s = await setup(oct(20));
+    await storeLeftover(s);
+    await s.setBasis("dueDate");
+    await s.complete(s.source, "today");
+    expect((await s.get(s.source)).dueAt).toBe(nov(5));
+    const s2 = await setup(oct(20));
+    await storeLeftover(s2);
+    await s2.setBasis("dueDate");
+    await s2.complete(await s2.copyUnder(s2.days.get(2)!, nov(2)), "today");
+    expect((await s2.get(s2.source)).dueAt).toBe(nov(5));
+  });
+
+  test("getWorkspaceSettings no longer reports it", async () => {
+    const s = await setup(oct(20));
+    await storeLeftover(s);
+    expect(await s.t.query(api.workspace.getWorkspaceSettings, { ownerKey })).toEqual({ timeZone: HNL });
   });
 });

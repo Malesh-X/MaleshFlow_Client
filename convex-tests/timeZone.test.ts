@@ -40,9 +40,10 @@ async function recurringTask(timeZone: string | null) {
 
 test("settings round-trip and reject unknown zones", async () => {
   const t = convexTest(schema, modules);
-  expect(await t.query(api.workspace.getWorkspaceSettings, { ownerKey })).toEqual({ timeZone: null, completionMode: null });
-  await t.mutation(api.workspace.setWorkspaceSettings, { ownerKey, timeZone: HNL, completionMode: "today" });
-  expect(await t.query(api.workspace.getWorkspaceSettings, { ownerKey })).toEqual({ timeZone: HNL, completionMode: "today" });
+  expect(await t.query(api.workspace.getWorkspaceSettings, { ownerKey })).toEqual({ timeZone: null });
+  // The deprecated completionMode argument is accepted but not stored.
+  await t.mutation(api.workspace.setWorkspaceSettings, { ownerKey, timeZone: HNL, completionMode: "dueDate" });
+  expect(await t.query(api.workspace.getWorkspaceSettings, { ownerKey })).toEqual({ timeZone: HNL });
   await expect(t.mutation(api.workspace.setWorkspaceSettings, { ownerKey, timeZone: "Nope/Zone" })).rejects.toThrow(/Unknown time zone/);
 });
 

@@ -3557,17 +3557,6 @@ function readStoredStringSet(key: string) {
   }
 }
 
-function readStoredRecurringCompletionMode<T extends RecurringCompletionMode | null>(defaultValue: T): RecurringCompletionMode | T {
-  if (typeof window === "undefined") {
-    return defaultValue;
-  }
-
-  const storedValue = window.localStorage.getItem(RECURRING_TASK_COMPLETION_MODE_STORAGE_KEY);
-  return storedValue === "today" || storedValue === "dueDate"
-    ? storedValue
-    : defaultValue;
-}
-
 function readStoredPlannerSidebarWidth() {
   if (typeof window === "undefined") {
     return PLANNER_RIGHT_SIDEBAR_DEFAULT_WIDTH;
@@ -3867,8 +3856,8 @@ function ConfiguredWorkspace({
   const [actionContextNodeId, setActionContextNodeId] = useState<string | null>(null);
   const [directSchedulePaletteNode, setDirectSchedulePaletteNode] =
     useState<SchedulePaletteNode | null>(null);
-  const [recurringCompletionMode, setRecurringCompletionMode] =
-    useState<RecurringCompletionMode>(DEFAULT_COMPLETION_MODE);
+  // Tasks without their own basis repeat from today.
+  const recurringCompletionMode: RecurringCompletionMode = DEFAULT_COMPLETION_MODE;
   const [plannerSidebarWidth, setPlannerSidebarWidth] = useState(
     PLANNER_RIGHT_SIDEBAR_DEFAULT_WIDTH,
   );
@@ -4148,41 +4137,19 @@ function ConfiguredWorkspace({
   );
   const workspaceTimeZone = workspaceSettings?.timeZone ?? null;
   const workspaceSettingsMigratedRef = useRef(false);
-  // First load: save this browser's time zone as the workspace zone, and move
-  // the completion mode from browser storage into workspace settings.
+  // First load: save this browser's time zone as the workspace zone.
   useEffect(() => {
     if (!ownerKey || !workspaceSettings || workspaceSettingsMigratedRef.current) {
       return;
     }
     workspaceSettingsMigratedRef.current = true;
     const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    // Only a mode this browser actually stored is migrated; a browser with
-    // nothing stored uses the default without saving it, so it can't
-    // overwrite another device's choice before that device migrates.
-    const storedCompletionMode = readStoredRecurringCompletionMode(null);
-    if (workspaceSettings.completionMode) {
-      setRecurringCompletionMode(workspaceSettings.completionMode);
-    } else {
-      setRecurringCompletionMode(storedCompletionMode ?? DEFAULT_COMPLETION_MODE);
-    }
-    const migrateTimeZone = !workspaceSettings.timeZone && !!browserTimeZone;
-    const migrateCompletionMode = !workspaceSettings.completionMode && storedCompletionMode !== null;
-    if (migrateTimeZone || migrateCompletionMode) {
-      void setWorkspaceSettings({
-        ownerKey,
-        ...(migrateTimeZone ? { timeZone: browserTimeZone } : {}),
-        ...(migrateCompletionMode ? { completionMode: storedCompletionMode } : {}),
-      });
+    if (!workspaceSettings.timeZone && browserTimeZone) {
+      void setWorkspaceSettings({ ownerKey, timeZone: browserTimeZone });
     }
   }, [ownerKey, setWorkspaceSettings, workspaceSettings]);
-  useEffect(() => {
-    if (workspaceSettings?.completionMode) {
-      setRecurringCompletionMode(workspaceSettings.completionMode);
-    }
-  }, [workspaceSettings?.completionMode]);
   // The schedule panel's "When this task is completed" choice: the task's own
-  // completion basis. The workspace setting stays the default for tasks
-  // without one.
+  // completion basis. Tasks without one repeat from today.
   const setRecurrenceBasisMutation = useMutation(api.workspace.setRecurrenceBasis);
   const handleTaskRecurrenceBasisChange = useCallback(
     (nodeId: string, mode: RecurringCompletionMode) => {

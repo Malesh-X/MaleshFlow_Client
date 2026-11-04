@@ -344,16 +344,6 @@ async function loadActiveNode(nodeId: string) {
 // as the app's checkbox: it routes planner items, task pages with a Done
 // archive, recurring tasks and notes. intent "complete" never reopens, and the
 // revision we read makes a repeated or stale request change nothing.
-type WorkspaceSettings = { timeZone: string | null; completionMode: "dueDate" | "today" | null };
-async function workspaceSettings(): Promise<WorkspaceSettings> {
-  try {
-    return (await query("workspace:getWorkspaceSettings")) as WorkspaceSettings;
-  } catch {
-    // Deployments from before workspace settings.
-    return { timeZone: null, completionMode: null };
-  }
-}
-
 type CompletionResult = {
   status: "applied" | "noop" | "stale";
   route: string;
@@ -372,9 +362,8 @@ const ROUTE_LABELS: Record<string, string> = {
 };
 
 async function completeLikeApp(nodeId: string) {
-  const settings = await workspaceSettings();
-  // --mode overrides the workspace setting; the default is today.
-  const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? settings.completionMode ?? "today";
+  // A task's own basis wins (server side); then --mode; then today.
+  const completionMode = oneOf("mode", ["dueDate", "today"] as const) ?? "today";
   const info = (await resolveNodes([nodeId])).get(nodeId);
   if (info?.archived) await loadVisibleNodePage(nodeId, info);
   if (info?.archived) {
