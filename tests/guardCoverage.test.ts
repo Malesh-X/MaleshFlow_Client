@@ -6,6 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXEMPT_MUTATIONS, GUARDED_MUTATIONS, GUARD_FUNCTION_NAMES } from "../convex/lib/guardRegistry";
 import { AGENT_FUNCTIONS, AGENT_HIDING_FUNCTION_NAMES, type AgentEntry } from "../convex/lib/agentRegistry";
+import { RETIRED_PUBLIC_FUNCTIONS } from "../convex/lib/retiredStubs";
 
 // Tests run from the repo root (npm test).
 const convexDir = join(process.cwd(), "convex");
@@ -97,7 +98,6 @@ const NO_OWNER_KEY = new Set([
   "oauth:exchangeCode",
   "oauth:refresh",
   "oauth:authenticate",
-  "workspace:validateOwnerKey",
   "workspace:checkOwnerKey",
 ]);
 const OWNER_KEY_CHECK = /assertOwnerKey(Guarded|GuardedInAction)?\(/;
@@ -132,6 +132,11 @@ test("every function that accepts agent tokens applies the data dump hiding rule
 test("every other public function checks the owner key, which refuses agent tokens", () => {
   for (const [name, block] of publicBlocks()) {
     if (name in AGENT_FUNCTIONS || NO_OWNER_KEY.has(name)) continue;
+    // Retired stubs return the same constant to everyone (convex/lib/retiredStubs.ts).
+    if (name in RETIRED_PUBLIC_FUNCTIONS) {
+      assert.match(block, /= query\(retiredNullQuery\);/, `${name} is retired but isn't a retiredNullQuery stub`);
+      continue;
+    }
     assert.ok(OWNER_KEY_CHECK.test(block), `${name} doesn't check the owner key`);
   }
   const auth = readFileSync(join(convexDir, "lib", "auth.ts"), "utf8");

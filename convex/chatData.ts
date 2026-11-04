@@ -9,6 +9,7 @@ import {
   syncLinksForNode,
 } from "./lib/workspace";
 import { withGuards } from "./lib/guards";
+import { retiredNullQuery } from "./lib/retiredStubs";
 
 export const ensureChatThread = mutation({
   args: {
@@ -226,3 +227,6 @@ export const replaceSectionLines = internalMutation({
     };
   },
 });
+
+// Retired: stub for tabs still running older bundles. See convex/lib/retiredStubs.ts.
+export const getWorkspaceKnowledgeThread = query(retiredNullQuery);

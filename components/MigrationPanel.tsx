@@ -1,7 +1,8 @@
 "use client";
 
 import clsx from "clsx";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation } from "convex/react";
+import { useWorkspaceQuery } from "@/components/useWorkspaceQuery";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -67,8 +68,8 @@ export function MigrationPanel({ ownerKey }: MigrationPanelProps) {
   const [isAbandoningRun, setIsAbandoningRun] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const runs = useQuery(api.migrationData.listMigrationRuns, { ownerKey }) ?? EMPTY_MIGRATION_RUNS;
-  const runDetails = useQuery(api.migrationData.getMigrationRun, {
+  const runs = useWorkspaceQuery(api.migrationData.listMigrationRuns, { ownerKey }) ?? EMPTY_MIGRATION_RUNS;
+  const runDetails = useWorkspaceQuery(api.migrationData.getMigrationRun, {
     ownerKey,
     runId: activeRunId ?? undefined,
   }) as MigrationRunDetails | null | undefined;
@@ -83,7 +84,7 @@ export function MigrationPanel({ ownerKey }: MigrationPanelProps) {
   const applyMigrationChunkToRemaining = useAction(
     api.migration.applyMigrationChunkToRemaining,
   );
-  const lessonsDocEntry = useQuery(api.migrationData.getMigrationLessonsDoc, {
+  const lessonsDocEntry = useWorkspaceQuery(api.migrationData.getMigrationLessonsDoc, {
     ownerKey,
     sourceType: runDetails?.run.sourceType ?? sourceType,
   });

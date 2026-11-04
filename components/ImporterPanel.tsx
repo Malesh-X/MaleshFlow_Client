@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { useQuery } from "convex/react";
+import { useWorkspaceQuery } from "@/components/useWorkspaceQuery";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -140,7 +140,7 @@ export function ImporterPanel({
 
   const targetPage =
     (targetPageId ? activePages.find((page) => page._id === targetPageId) : null) ?? null;
-  const appendAfterNodeId = useQuery(
+  const appendAfterNodeId = useWorkspaceQuery(
     api.workspace.getPageRootAppendTarget,
     ownerKey && targetPage
       ? {

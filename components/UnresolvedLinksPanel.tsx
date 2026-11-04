@@ -1,7 +1,8 @@
 "use client";
 
 import clsx from "clsx";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useWorkspaceQuery } from "@/components/useWorkspaceQuery";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -187,7 +188,7 @@ export function UnresolvedLinksPanel({
   const replaceUnresolvedPageLinksWithTarget = useMutation(
     api.workspace.replaceUnresolvedPageLinksWithTarget,
   );
-  const groupsResult = useQuery(
+  const groupsResult = useWorkspaceQuery(
     api.workspace.listUnresolvedPageLinkGroups,
     ownerKey
       ? {
@@ -233,7 +234,7 @@ export function UnresolvedLinksPanel({
     setApplyProgress(null);
   }, [activeGroup]);
 
-  const targetResults = useQuery(
+  const targetResults = useWorkspaceQuery(
     api.workspace.searchLinkTargets,
     ownerKey && activeGroup && debouncedSearchQuery.trim().length > 0
       ? {

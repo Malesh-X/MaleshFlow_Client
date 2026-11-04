@@ -1,7 +1,8 @@
 "use client";
 
 import clsx from "clsx";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation } from "convex/react";
+import { useWorkspaceQuery } from "@/components/useWorkspaceQuery";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -313,11 +314,11 @@ export function LegacyPanel({
   const [semanticBuildFileId, setSemanticBuildFileId] = useState<string | null>(null);
   const [semanticBuildError, setSemanticBuildError] = useState("");
 
-  const files = useQuery(
+  const files = useWorkspaceQuery(
     api.legacy.listLegacyFiles,
     ownerKey ? { ownerKey, limit: 200 } : SKIP,
   ) as LegacyFile[] | undefined;
-  const exactResults = useQuery(
+  const exactResults = useWorkspaceQuery(
     api.legacy.searchLegacyText,
     ownerKey && view === "search" && searchMode === "text" && debouncedQuery.trim().length > 0
       ? {
@@ -328,7 +329,7 @@ export function LegacyPanel({
         }
       : SKIP,
   ) as LegacySearchResult[] | undefined;
-  const viewerFileResult = useQuery(
+  const viewerFileResult = useWorkspaceQuery(
     api.legacy.getLegacyFileViewer,
     ownerKey && view === "viewer" && viewerFileId
       ? { ownerKey, fileId: viewerFileId }
@@ -344,7 +345,7 @@ export function LegacyPanel({
   const viewerPageSize = viewerIsSmallFile
     ? Math.max(1, viewerFile.chunkCount)
     : LEGACY_VIEWER_PAGE_CHUNKS;
-  const viewerChunksPage = useQuery(
+  const viewerChunksPage = useWorkspaceQuery(
     api.legacy.listLegacyFileChunksPage,
     ownerKey && view === "viewer" && viewerFileId && viewerFile?.status === "ready"
       ? {

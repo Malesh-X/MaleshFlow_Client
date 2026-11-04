@@ -4,7 +4,7 @@
 // after a deploy can call Convex functions that no longer exist; this finds
 // such tabs and reloads them at a safe moment (see lib/domain/appVersion.ts).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ConvexReactClient } from "convex/react";
 import {
   canAutoReload,
@@ -16,6 +16,7 @@ import {
   parseLastAutoReloadAt,
   type BuildStatus,
 } from "@/lib/domain/appVersion";
+import { convexHealth, type ConvexHealthSnapshot } from "@/lib/domain/convexHealth";
 
 export const CLIENT_BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID ?? null;
 
@@ -24,6 +25,10 @@ const VERSION_FETCH_TIMEOUT_MS = 5_000;
 const VERSION_CHECK_THROTTLE_MS = 10_000;
 const VERSION_POLL_INTERVAL_MS = 5 * 60_000;
 const STALE_TICK_INTERVAL_MS = 15_000;
+// While a Convex call is failing, look for the new frontend this often: during
+// a deploy the backend changes first and the new frontend goes live a few
+// minutes later.
+const PROBLEM_POLL_INTERVAL_MS = 15_000;
 const LAST_AUTO_RELOAD_KEY = "flow:lastAutoReloadAt";
 
 // Pending local edits the reload must not drop. Editors register a probe
@@ -37,7 +42,7 @@ export function registerUnsavedEditsProbe(probe: () => boolean) {
   };
 }
 
-function hasUnsavedEdits() {
+export function hasUnsavedEdits() {
   for (const probe of unsavedEditsProbes) {
     try {
       if (probe()) {
@@ -99,6 +104,24 @@ function autoReload() {
   return true;
 }
 
+// The Reload buttons. Asks first when an editor holds text that has not saved.
+export function reloadNow() {
+  if (
+    hasUnsavedEdits() &&
+    !window.confirm("Some text hasn't saved yet. Reload anyway and lose it?")
+  ) {
+    return;
+  }
+  window.location.reload();
+}
+
+const SERVER_HEALTH: ConvexHealthSnapshot = { problem: null, lastFailedWriteAt: null };
+const getServerHealth = () => SERVER_HEALTH;
+
+export function useConvexHealth() {
+  return useSyncExternalStore(convexHealth.subscribe, convexHealth.getSnapshot, getServerHealth);
+}
+
 // Called by the workspace error boundary. Returns true when it reloaded.
 export async function recoverFromConvexError(error: unknown) {
   const isConvexError = isConvexServerError(error);
@@ -115,9 +138,16 @@ export async function recoverFromConvexError(error: unknown) {
 
 export function StaleTabWatcher({ client }: { client: ConvexReactClient | null }) {
   const [showNotice, setShowNotice] = useState(false);
+  const health = useConvexHealth();
+  const hasProblem = health.problem !== null;
+  const hasProblemRef = useRef(hasProblem);
   const staleSinceRef = useRef<number | null>(null);
   const lastCheckAtRef = useRef(0);
   const checkingRef = useRef(false);
+
+  useEffect(() => {
+    hasProblemRef.current = hasProblem;
+  }, [hasProblem]);
 
   const evaluate = useCallback(
     (returning: boolean) => {
@@ -136,6 +166,7 @@ export function StaleTabWatcher({ client }: { client: ConvexReactClient | null }
         returning,
         staleForMs: Date.now() - staleSince,
         reloadAllowed: isAutoReloadAllowed(),
+        hasConvexProblem: hasProblemRef.current,
       });
       if (action === "reload" && autoReload()) {
         return;
@@ -205,23 +236,57 @@ export function StaleTabWatcher({ client }: { client: ConvexReactClient | null }
     };
   }, [check, client, evaluate]);
 
-  if (!showNotice) {
+  // A failing Convex call: check for the new frontend now, then keep checking
+  // until it is live (reloading when safe) or the problem clears.
+  useEffect(() => {
+    if (!hasProblem) {
+      return;
+    }
+    void check(false);
+    const poll = window.setInterval(() => void check(false), PROBLEM_POLL_INTERVAL_MS);
+    return () => window.clearInterval(poll);
+  }, [check, hasProblem]);
+
+  return <AppStatusBanner health={health} stale={showNotice} />;
+}
+
+// Small, non-blocking notice at the bottom right. The workspace keeps working
+// (with its last loaded data) underneath.
+export function AppStatusBanner({
+  health,
+  stale,
+}: {
+  health: ConvexHealthSnapshot;
+  stale: boolean;
+}) {
+  if (!health.problem && !stale) {
     return null;
   }
+  const message =
+    health.problem?.kind === "server" && !stale
+      ? "Flow can't load the latest data."
+      : "Flow was updated.";
 
   return (
     <div
       role="status"
-      className="fixed bottom-4 right-4 z-[1000] flex items-center gap-3 border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-3 py-2 text-sm text-[var(--workspace-text)] shadow-lg"
+      className="fixed bottom-4 right-4 z-[1000] flex max-w-[calc(100vw-2rem)] flex-col gap-1 border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-3 py-2 text-sm text-[var(--workspace-text)] shadow-lg"
     >
-      <span>New version</span>
-      <button
-        type="button"
-        onClick={() => window.location.reload()}
-        className="font-semibold text-[var(--workspace-brand)] hover:underline"
-      >
-        Reload
-      </button>
+      <div className="flex items-center gap-3">
+        <span>{message}</span>
+        <button
+          type="button"
+          onClick={reloadNow}
+          className="font-semibold text-[var(--workspace-brand)] hover:underline"
+        >
+          Reload
+        </button>
+      </div>
+      {health.lastFailedWriteAt !== null ? (
+        <span className="text-xs text-[var(--workspace-text-subtle)]">
+          A change didn&apos;t save. Your text is still here.
+        </span>
+      ) : null}
     </div>
   );
 }

@@ -13,6 +13,7 @@ import {
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { authorizeCaller } from "./lib/agentAuth";
+import { retiredNullQuery } from "./lib/retiredStubs";
 import {
   agentRefuseLanding,
   agentRefuseNodes,
@@ -7727,3 +7728,9 @@ export const syncNodeLinks = internalMutation({
     await syncLinksForNode(ctx.db, node);
   },
 });
+
+// Retired: stubs for tabs still running older bundles. See convex/lib/retiredStubs.ts.
+export const validateOwnerKey = query(retiredNullQuery);
+export const getWorkspaceAiMemory = query(retiredNullQuery);
+export const getWorkspaceInbox = query(retiredNullQuery);
+export const getWorkspaceRandomBox = query(retiredNullQuery);

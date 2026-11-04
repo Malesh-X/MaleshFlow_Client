@@ -1,7 +1,8 @@
 "use client";
 
 import clsx from "clsx";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useWorkspaceQuery } from "@/components/useWorkspaceQuery";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
@@ -75,7 +76,7 @@ export function FindReplacePanel({
     return () => window.clearTimeout(timeoutId);
   }, [findText, replaceText]);
 
-  const preview = useQuery(
+  const preview = useWorkspaceQuery(
     api.workspace.previewFindAndReplace,
     ownerKey && debouncedFindText.length > 0
       ? {

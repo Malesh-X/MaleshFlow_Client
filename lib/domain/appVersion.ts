@@ -74,18 +74,26 @@ export type StaleTabInput = {
   returning: boolean;
   staleForMs: number;
   reloadAllowed: boolean;
+  // A Convex call from this tab is failing (see lib/domain/convexHealth.ts).
+  // The tab is already degraded, so a safe reload need not wait for a break.
+  hasConvexProblem?: boolean;
   noticeAfterMs?: number;
 };
 
 // What a stale tab does now. It reloads while the person is away or the
 // moment they come back, never while they are working in it; if that moment
-// does not come soon, it shows a small notice instead of interrupting.
+// does not come soon, it shows a small notice instead of interrupting. A tab
+// whose Convex calls are already failing reloads as soon as it is safe.
 export function decideStaleTabAction(input: StaleTabInput): StaleTabAction {
   const noticeAfterMs = input.noticeAfterMs ?? STALE_NOTICE_AFTER_MS;
-  if (input.reloadAllowed && input.safe && (input.away || input.returning)) {
+  if (
+    input.reloadAllowed &&
+    input.safe &&
+    (input.away || input.returning || input.hasConvexProblem)
+  ) {
     return "reload";
   }
-  if (!input.reloadAllowed || input.staleForMs >= noticeAfterMs) {
+  if (!input.reloadAllowed || input.hasConvexProblem || input.staleForMs >= noticeAfterMs) {
     return "notify";
   }
   return "wait";

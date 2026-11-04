@@ -7,8 +7,8 @@ import {
   useConvex,
   useConvexConnectionState,
   useMutation,
-  useQuery,
 } from "convex/react";
+import { useWorkspaceQuery } from "@/components/useWorkspaceQuery";
 import {
   Component,
   createContext,
@@ -167,7 +167,9 @@ import {
   useWorkspaceHistory,
   useWorkspaceHistoryController,
 } from "@/components/workspaceHistory";
-import { recoverFromConvexError } from "@/components/appUpdate";
+import { recoverFromConvexError, reloadNow } from "@/components/appUpdate";
+import { convexHealth, describeWriteError } from "@/lib/domain/convexHealth";
+import { isConvexServerError } from "@/lib/domain/appVersion";
 import { ArchiveSearchPanel } from "@/components/ArchiveSearchPanel";
 import { FindReplacePanel } from "@/components/FindReplacePanel";
 import { ImporterPanel } from "@/components/ImporterPanel";
@@ -981,7 +983,7 @@ function usePlannerSymbolLabels({
   const requestedKeysRef = useRef(new Set<string>());
   const [generationFailure, setGenerationFailure] =
     useState<PlannerSymbolGenerationFailure | null>(null);
-  const result = useQuery(
+  const result = useWorkspaceQuery(
     api.plannerSymbols.getPlannerSymbolLabels,
     enabled && ownerKey && plannerPageId && candidateNodeIds.length > 0
       ? { ownerKey, plannerPageId, nodeIds: candidateNodeIds }
@@ -1353,6 +1355,12 @@ class WorkspaceErrorBoundary extends Component<
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("Workspace render failed", error, errorInfo);
+    // Workspace queries don't throw (useWorkspaceQuery), but anything Convex
+    // that still lands here marks the shared state, so the stale-tab watcher
+    // keeps looking for the new frontend and reloads once it is live.
+    if (isConvexServerError(error)) {
+      convexHealth.reportQueryError("workspace-error-boundary", "render", error);
+    }
     this.setState({
       error,
       componentStack: errorInfo.componentStack ?? "",
@@ -1376,6 +1384,7 @@ class WorkspaceErrorBoundary extends Component<
   }
 
   handleReset = () => {
+    convexHealth.clearQueryError("workspace-error-boundary");
     this.setState((currentState) => ({
       error: null,
       componentStack: "",
@@ -1389,6 +1398,38 @@ class WorkspaceErrorBoundary extends Component<
       return (
         <main className="min-h-screen bg-[var(--workspace-bg)] px-6 py-8 text-sm text-[var(--workspace-text-subtle)]">
           Loading…
+        </main>
+      );
+    }
+
+    // A Convex error is a backend/bundle mismatch, not a render bug: a short
+    // notice, never the debug screen.
+    if (this.state.error && isConvexServerError(this.state.error)) {
+      return (
+        <main className="grid min-h-screen place-items-center bg-[var(--workspace-bg)] p-6 text-[var(--workspace-text)]">
+          <div className="w-full max-w-md border border-[var(--workspace-border)] bg-[var(--workspace-surface)] p-6">
+            <h1 className="text-lg font-semibold">Flow was updated</h1>
+            <p className="mt-2 text-sm leading-6 text-[var(--workspace-text-subtle)]">
+              This tab is running an older version. It reloads on its own once the new
+              version is ready.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={reloadNow}
+                className="bg-[var(--workspace-brand)] px-4 py-2 text-sm font-semibold text-[var(--workspace-inverse-text)] transition hover:bg-[var(--workspace-brand-hover)]"
+              >
+                Reload
+              </button>
+              <button
+                type="button"
+                onClick={this.handleReset}
+                className="border border-[var(--workspace-border)] px-4 py-2 text-sm transition hover:bg-[var(--workspace-surface-muted)]"
+              >
+                Try again
+              </button>
+            </div>
+          </div>
         </main>
       );
     }
@@ -1442,6 +1483,13 @@ class WorkspaceErrorBoundary extends Component<
               </div>
 
               <div className="mt-6 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={reloadNow}
+                  className="bg-[var(--workspace-brand)] px-4 py-2 text-sm font-semibold text-[var(--workspace-inverse-text)] transition hover:bg-[var(--workspace-brand-hover)]"
+                >
+                  Reload
+                </button>
                 <button
                   type="button"
                   onClick={this.handleReset}
@@ -2384,7 +2432,7 @@ function useLinkTargetSuggestions({
     return () => window.clearTimeout(timeout);
   }, [tokenActive, tokenIncludeArchived, tokenQuery]);
 
-  const results = useQuery(
+  const results = useWorkspaceQuery(
     api.workspace.searchLinkTargets,
     tokenActive && debouncedToken
       ? {
@@ -3708,7 +3756,7 @@ export default function WorkspaceApp() {
       );
     } catch (error) {
       setOwnerKeyGateError(
-        error instanceof Error ? error.message : "Could not verify the token right now.",
+        describeWriteError(error, "Could not verify the token right now."),
       );
     } finally {
       setIsCheckingOwnerKey(false);
@@ -3924,42 +3972,56 @@ function ConfiguredWorkspace({
 
   // Checked once per key with the checkOwnerKey mutation, which counts a
   // wrong key toward the lockout (a query can't). undefined while checking.
+  // Only an answer of "not valid" clears the saved key: a server error (an
+  // outage, or a deploy this tab predates) keeps it and retries.
   const checkOwnerKeyOnLoad = useMutation(api.workspace.checkOwnerKey);
   const [ownerKeyCheck, setOwnerKeyCheck] = useState<{ key: string; valid: boolean } | null>(null);
+  const [ownerKeyCheckAttempt, setOwnerKeyCheckAttempt] = useState(0);
   useEffect(() => {
     if (!ownerKey) {
       return;
     }
     let cancelled = false;
+    let retryTimeoutId: number | null = null;
     void checkOwnerKeyOnLoad({ ownerKey })
       .then((result) => {
         if (!cancelled) {
           setOwnerKeyCheck({ key: ownerKey, valid: result.valid });
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) {
+          retryTimeoutId = window.setTimeout(
+            () => setOwnerKeyCheckAttempt((attempt) => attempt + 1),
+            Math.min(30_000, 2_000 * 2 ** Math.min(ownerKeyCheckAttempt, 4)),
+          );
+        }
+      });
     return () => {
       cancelled = true;
+      if (retryTimeoutId !== null) {
+        window.clearTimeout(retryTimeoutId);
+      }
     };
-  }, [checkOwnerKeyOnLoad, ownerKey]);
+  }, [checkOwnerKeyOnLoad, ownerKey, ownerKeyCheckAttempt]);
   const isOwnerKeyValid = ownerKeyCheck?.key === ownerKey ? ownerKeyCheck.valid : undefined;
-  const pages = useQuery(
+  const pages = useWorkspaceQuery(
     api.workspace.listPages,
     ownerKey && isOwnerKeyValid ? { ownerKey, includeArchived: true } : SKIP,
   );
-  const sidebarFavorites = useQuery(
+  const sidebarFavorites = useWorkspaceQuery(
     api.workspace.listSidebarFavorites,
     ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
   ) as SidebarFavoriteResult[] | undefined;
-  const legacyFiles = useQuery(
+  const legacyFiles = useWorkspaceQuery(
     api.legacy.listLegacyFiles,
     ownerKey && isOwnerKeyValid ? { ownerKey, limit: 100 } : SKIP,
   ) as Doc<"legacyFiles">[] | undefined;
-  const embeddingRebuildProgress = useQuery(
+  const embeddingRebuildProgress = useWorkspaceQuery(
     api.workspace.getEmbeddingRebuildStatus,
     ownerKey && isOwnerKeyValid && shouldTrackEmbeddingRebuild ? { ownerKey } : SKIP,
   );
-  const embeddingRebuildErrors = useQuery(
+  const embeddingRebuildErrors = useWorkspaceQuery(
     api.workspace.getRecentEmbeddingErrors,
     ownerKey &&
       isOwnerKeyValid &&
@@ -3968,13 +4030,13 @@ function ConfiguredWorkspace({
       ? { ownerKey, limit: 6 }
       : SKIP,
   );
-  const pageTree = useQuery(
+  const pageTree = useWorkspaceQuery(
     api.workspace.getPageTree,
     ownerKey && isOwnerKeyValid && selectedPageId
       ? { ownerKey, pageId: selectedPageId }
       : SKIP,
   ) as PageTreeResult | null | undefined;
-  const multiPageView = useQuery(
+  const multiPageView = useWorkspaceQuery(
     api.workspace.getMultiPageView,
     ownerKey &&
       isOwnerKeyValid &&
@@ -3984,30 +4046,30 @@ function ConfiguredWorkspace({
       ? { ownerKey, pageId: selectedPageId }
       : SKIP,
   ) as MultiPageViewResult | null | undefined;
-  const sidebarTree = useQuery(
+  const sidebarTree = useWorkspaceQuery(
     api.workspace.getSidebarTree,
     ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
   ) as SidebarTreeResult | null | undefined;
   const overdueTaskCutoff = getTodayReferenceDate().getTime();
-  const overdueTaskQueryResults = useQuery(
+  const overdueTaskQueryResults = useWorkspaceQuery(
     api.workspace.listOverdueTasks,
     ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "overdueTasks"
       ? { ownerKey, overdueBefore: overdueTaskCutoff }
       : SKIP,
   ) as NodeSearchResult[] | undefined;
-  const waitingTaskQueryResults = useQuery(
+  const waitingTaskQueryResults = useWorkspaceQuery(
     api.workspace.listWaitingTasks,
     ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "waitingTasks"
       ? { ownerKey }
       : SKIP,
   ) as NodeSearchResult[] | undefined;
-  const dataDumpExclusionsQueryResult = useQuery(
+  const dataDumpExclusionsQueryResult = useWorkspaceQuery(
     api.workspace.listDataDumpExclusions,
     ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "dataDumpExclusions"
       ? { ownerKey }
       : SKIP,
   ) as DataDumpExclusionsResult | undefined;
-  const connectedAgentsQueryResult = useQuery(
+  const connectedAgentsQueryResult = useWorkspaceQuery(
     api.oauth.listConnectedAgents,
     ownerKey && isOwnerKeyValid && paletteOpen && paletteMode === "connectedAgents"
       ? { ownerKey }
@@ -4077,11 +4139,7 @@ function ConfiguredWorkspace({
       try {
         return await operation();
       } catch (error) {
-        setSyncErrorMessage(
-          error instanceof Error && error.message.trim().length > 0
-            ? error.message
-            : fallbackMessage,
-        );
+        setSyncErrorMessage(describeWriteError(error, fallbackMessage));
         throw error;
       } finally {
         finishPendingSync(token);
@@ -4131,7 +4189,7 @@ function ConfiguredWorkspace({
   const forceArchiveTaskPageItemRaw = useMutation(api.workspace.forceArchiveTaskPageItem);
   const setModelPageCustomPrompt = useMutation(api.workspace.setModelPageCustomPrompt);
   const setWorkspaceSettings = useMutation(api.workspace.setWorkspaceSettings);
-  const workspaceSettings = useQuery(
+  const workspaceSettings = useWorkspaceQuery(
     api.workspace.getWorkspaceSettings,
     ownerKey && isOwnerKeyValid ? { ownerKey } : SKIP,
   );
@@ -17637,7 +17695,7 @@ function OutlineNodeEditor({
   const nodeLinkTargetIds = parsedLinkTargets.nodeIds;
   const showChildrenNodeLinkTargetIds = parsedLinkTargets.showChildrenNodeIds;
   const showChildrenPageLinkTargetIds = parsedLinkTargets.showChildrenPageIds;
-  const resolvedNodeLinks = useQuery(
+  const resolvedNodeLinks = useWorkspaceQuery(
     api.workspace.resolveNodeLinks,
     ownerKey && !isFocused && nodeLinkTargetIds.length > 0
       ? {
@@ -17654,7 +17712,7 @@ function OutlineNodeEditor({
     }
     return next;
   }, [resolvedNodeLinks]);
-  const resolvedPageLinks = useQuery(
+  const resolvedPageLinks = useWorkspaceQuery(
     api.workspace.resolvePageLinks,
     ownerKey && !isFocused && showChildrenPageLinkTargetIds.length > 0
       ? {
