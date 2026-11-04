@@ -299,3 +299,22 @@ test("functions outside the allowlist refuse agent tokens", async () => {
   // Agent tokens never pass as the owner key.
   expect((await t.mutation(api.workspace.checkOwnerKey, { ownerKey: agent })).valid).toBe(false);
 });
+
+test("rotating the owner key revokes every agent connection", async () => {
+  const t = convexTest(schema, modules);
+  const tokens = await connect(t);
+  await t.query(api.workspace.listPages, { ownerKey: tokens.accessToken });
+  const grant = await t.run(async (ctx) => await ctx.db.query("oauthGrants").first());
+  expect(grant?.ownerKeyFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(grant)).not.toContain(ownerKey);
+
+  process.env.OWNER_ACCESS_TOKEN = "rotated-owner-key";
+  await expect(t.query(api.workspace.listPages, { ownerKey: tokens.accessToken })).rejects.toThrow(/revoked/);
+  expect(await t.mutation(api.oauth.refresh, { clientId: tokens.clientId, refreshToken: tokens.refreshToken, resource })).toMatchObject({ ok: false });
+  expect(await t.query(api.oauth.listConnectedAgents, { ownerKey: "rotated-owner-key" })).toEqual([]);
+
+  // A grant from before fingerprints existed is refused too.
+  process.env.OWNER_ACCESS_TOKEN = ownerKey;
+  await t.run(async (ctx) => await ctx.db.patch(grant!._id, { ownerKeySalt: undefined, ownerKeyFingerprint: undefined }));
+  await expect(t.query(api.workspace.listPages, { ownerKey: tokens.accessToken })).rejects.toThrow(/revoked/);
+});

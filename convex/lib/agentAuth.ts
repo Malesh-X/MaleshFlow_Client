@@ -1,6 +1,8 @@
 import type { DatabaseReader } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
-import { isAgentAccessToken, sha256Hex } from "../../lib/domain/agentOAuth";
+import type { Doc } from "../_generated/dataModel";
+import { isAgentAccessToken, randomToken, sha256Hex } from "../../lib/domain/agentOAuth";
+import { constantTimeEqual } from "./auth";
 import { AGENT_FUNCTIONS, type AgentFunctionName } from "./agentRegistry";
 import { assertOwnerKeyGuarded, isAuthLocked } from "./authThrottle";
 
@@ -12,6 +14,28 @@ export type Caller =
   | { kind: "agent"; grantId: Id<"oauthGrants">; clientName: string };
 
 export const isAgent = (caller: Caller) => caller.kind === "agent";
+
+// Ties a grant to the owner key it was approved with, so rotating
+// OWNER_ACCESS_TOKEN revokes every agent connection. Stored per grant:
+// a random salt and SHA-256(salt:key), never the key itself.
+export async function ownerKeyFingerprintFor(salt: string) {
+  const key = process.env.OWNER_ACCESS_TOKEN;
+  return key ? await sha256Hex(`${salt}:${key}`) : null;
+}
+
+export async function newOwnerKeyFingerprint() {
+  const ownerKeySalt = randomToken("");
+  const ownerKeyFingerprint = await ownerKeyFingerprintFor(ownerKeySalt);
+  if (!ownerKeyFingerprint) throw new Error("OWNER_ACCESS_TOKEN is not configured.");
+  return { ownerKeySalt, ownerKeyFingerprint };
+}
+
+// Not revoked, and approved with the current owner key.
+export async function isGrantCurrent(grant: Doc<"oauthGrants"> | null): Promise<boolean> {
+  if (!grant || grant.revokedAt !== null || !grant.ownerKeySalt || !grant.ownerKeyFingerprint) return false;
+  const current = await ownerKeyFingerprintFor(grant.ownerKeySalt);
+  return current !== null && constantTimeEqual(current, grant.ownerKeyFingerprint);
+}
 
 // The access token's row when it is valid now: not expired, not revoked, and
 // its grant not revoked. Read-only, so queries can use it; revoking takes
@@ -25,7 +49,7 @@ export async function findValidAccessToken(db: DatabaseReader, token: string) {
     .unique();
   if (!row || row.kind !== "access" || row.revokedAt !== null || row.expiresAt <= Date.now()) return null;
   const grant = await db.get(row.grantId);
-  if (!grant || grant.revokedAt !== null) return null;
+  if (!grant || !(await isGrantCurrent(grant))) return null;
   return { row, grant };
 }
 

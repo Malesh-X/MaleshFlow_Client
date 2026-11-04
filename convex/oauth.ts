@@ -36,7 +36,7 @@ import {
   verifyPkceS256,
 } from "../lib/domain/agentOAuth";
 import { assertOwnerKeyGuarded, recordOwnerKeyValidation } from "./lib/authThrottle";
-import { findValidAccessToken } from "./lib/agentAuth";
+import { findValidAccessToken, isGrantCurrent, newOwnerKeyFingerprint } from "./lib/agentAuth";
 import { withGuards } from "./lib/guards";
 
 const MAX_REDIRECT_URIS = 10;
@@ -128,6 +128,7 @@ export const approve = mutation({
       clientId: client.clientId,
       clientName: client.clientName,
       redirectHost: redirectHost(args.redirectUri),
+      ...(await newOwnerKeyFingerprint()),
       createdAt: now,
       lastUsedAt: null,
       revokedAt: null,
@@ -210,7 +211,7 @@ export const exchangeCode = mutation({
     if (!(await verifyPkceS256(args.codeVerifier, row.codeChallenge))) return oauthError("invalid_grant", "PKCE verification failed.");
     if (!resourceMatches(row.resource, args.resource)) return oauthError("invalid_target", "resource doesn't match the authorization request.");
     const grant = await ctx.db.get(row.grantId);
-    if (!grant || grant.revokedAt !== null) return oauthError("invalid_grant", "This connection was revoked.");
+    if (!grant || !(await isGrantCurrent(grant))) return oauthError("invalid_grant", "This connection was revoked.");
     await ctx.db.patch(grant._id, { lastUsedAt: now });
     return await issueTokens(ctx, grant, row.resource ?? args.resource ?? null);
   },
@@ -240,7 +241,7 @@ export const refresh = mutation({
     if (row.expiresAt <= now) return oauthError("invalid_grant", "That refresh token expired.");
     if (!resourceMatches(row.resource, args.resource)) return oauthError("invalid_target", "resource doesn't match the original grant.");
     const grant = await ctx.db.get(row.grantId);
-    if (!grant || grant.revokedAt !== null) return oauthError("invalid_grant", "This connection was revoked.");
+    if (!grant || !(await isGrantCurrent(grant))) return oauthError("invalid_grant", "This connection was revoked.");
     await ctx.db.patch(row._id, { lastUsedAt: now });
     await ctx.db.patch(grant._id, { lastUsedAt: now });
     // Tidy up this grant's expired and used tokens.
@@ -286,7 +287,10 @@ export const listConnectedAgents = query({
       .withIndex("by_revokedAt", (q) => q.eq("revokedAt", null))
       .order("desc")
       .take(200);
-    return grants.map((grant) => ({
+    // Grants from an older owner key no longer work, so they aren't listed.
+    const current = [];
+    for (const grant of grants) if (await isGrantCurrent(grant)) current.push(grant);
+    return current.map((grant) => ({
       grantId: grant._id,
       clientName: grant.clientName,
       redirectHost: grant.redirectHost,

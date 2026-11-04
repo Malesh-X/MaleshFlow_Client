@@ -401,6 +401,11 @@ export default defineSchema({
     clientId: v.string(),
     clientName: v.string(),
     redirectHost: v.string(),
+    // SHA-256 of `${ownerKeySalt}:${OWNER_ACCESS_TOKEN}` when the grant was
+    // approved. Rotating the owner key makes every older grant stop working
+    // (see isGrantCurrent). Grants from before this field are refused.
+    ownerKeySalt: v.optional(v.string()),
+    ownerKeyFingerprint: v.optional(v.string()),
     createdAt: v.number(),
     lastUsedAt: v.union(v.number(), v.null()),
     revokedAt: v.union(v.number(), v.null()),

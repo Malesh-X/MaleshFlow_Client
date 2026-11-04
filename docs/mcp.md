@@ -120,6 +120,12 @@ connect it again, sign in again from the agent.
 Revoking also happens on its own when a used refresh token or authorization
 code is presented again (a sign the key leaked).
 
+Rotating the owner key (`OWNER_ACCESS_TOKEN`) revokes every connected agent.
+Each connection stores a salted SHA-256 fingerprint of the owner key it was
+approved with, and stops working once that no longer matches the current key.
+Connections made before fingerprints existed (November 2026) are refused too;
+reconnect them once.
+
 ## How it works
 
 | Path | What |
