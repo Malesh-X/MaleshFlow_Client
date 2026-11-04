@@ -17,7 +17,6 @@ import {
   excludedReferenceProblem,
   findSectionNode,
   findStrayNodes,
-  getDataDumpVisibility,
   isDataDumpExcluded,
   isNodeCompleted,
   isNodeLocked,
@@ -36,8 +35,20 @@ import {
   type PageDoc,
   type SidebarSection,
   type TreeNode,
-} from "./flowLogic";
-import { collectLinkTargetIds, linkLookup, renderLinks, toStoredLinkText, type LinkLookup, type LinkTargets } from "./flowLinks";
+} from "../lib/flow/logic";
+import { toStoredLinkText, type LinkLookup } from "../lib/flow/links";
+import {
+  displayText,
+  outlineLine,
+  outlineLines,
+  parseRecurrence,
+  parseTimeOfDay,
+  resolveLinkLookup,
+  visiblePageTree,
+  withLinks,
+  type PageTree,
+  type VisibleTree,
+} from "../lib/flow/format";
 
 type Spec = { args: string[]; optional?: string[]; flags?: string[]; usage: string };
 
@@ -185,19 +196,22 @@ function parseDue(value: string | undefined) {
 // `existingZone`: the item's time zone, kept when it has one.
 function parseTime(value: string | undefined, existingZone?: string | null) {
   if (value === undefined) return {};
-  if (value === "none") return { dueTime: null, dueTimeZone: null };
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) fail(`Bad time "${value}"; use 24-hour HH:MM or none.`);
-  return { dueTime: value, dueTimeZone: timeZoneForTime(existingZone, Intl.DateTimeFormat().resolvedOptions().timeZone) };
+  let dueTime: string | null;
+  try {
+    dueTime = parseTimeOfDay(value);
+  } catch (error) {
+    return fail((error as Error).message);
+  }
+  if (dueTime === null) return { dueTime: null, dueTimeZone: null };
+  return { dueTime, dueTimeZone: timeZoneForTime(existingZone, Intl.DateTimeFormat().resolvedOptions().timeZone) };
 }
 
 function parseRecur(value: string | undefined) {
-  if (value === undefined) return undefined;
-  if (value === "none") return null;
-  if (["daily", "weekly", "monthly", "yearly"].includes(value)) return value;
-  const match = value.match(/^(\d+)([dwmy])$/);
-  if (!match || Number(match[1]) < 1) fail(`Bad --recur "${value}"; use daily|weekly|monthly|yearly, <n>d|w|m|y, or none.`);
-  const unit = { d: "day", w: "week", m: "month", y: "year" }[match[2] as "d" | "w" | "m" | "y"];
-  return { interval: Number(match[1]), unit };
+  try {
+    return parseRecurrence(value);
+  } catch {
+    return fail(`Bad --recur "${value}"; use daily|weekly|monthly|yearly, <n>d|w|m|y, or none.`);
+  }
 }
 
 // ---- connection (created only once a valid command needs it) ----
@@ -260,50 +274,26 @@ const print = (value: unknown) => console.log(typeof value === "string" ? value 
 const ok = (value?: unknown) => (dryRun ? console.log("(dry run: nothing was sent)") : print(value ?? "ok"));
 
 // ---- links ----
-// Item text prints with links resolved (see scripts/flowLinks.ts and
+// Item text prints with links resolved (see lib/flow/links.ts and
 // docs/flow-cli.md): one workspace:resolveLinkTargets call per command
 // (per 500 targets). --raw skips it and prints stored text.
-const LINK_TARGET_CHUNK = 500;
 async function resolveLinkText(texts: string[]): Promise<LinkLookup | null> {
   if (flags.raw) return null;
-  const { nodeIds, pageIds } = collectLinkTargetIds(texts);
-  const targets: LinkTargets = { nodes: [], pages: [] };
-  const ids = [...nodeIds.map((id) => ["node", id] as const), ...pageIds.map((id) => ["page", id] as const)];
   try {
-    for (let i = 0; i < ids.length; i += LINK_TARGET_CHUNK) {
-      const chunk = ids.slice(i, i + LINK_TARGET_CHUNK);
-      const result = (await query("workspace:resolveLinkTargets", {
-        nodeIds: chunk.filter(([kind]) => kind === "node").map(([, id]) => id),
-        pageIds: chunk.filter(([kind]) => kind === "page").map(([, id]) => id),
-      })) as LinkTargets;
-      targets.nodes.push(...result.nodes);
-      targets.pages.push(...result.pages);
-    }
+    return await resolveLinkLookup(texts, query);
   } catch (error) {
     // E.g. a deployment from before workspace:resolveLinkTargets (production
     // reports that only as "Server Error"). Output still works, unresolved.
     console.error(`Couldn't resolve links (${(error as Error)?.message ?? error}); showing stored link syntax.`);
     return null;
   }
-  return linkLookup(targets);
 }
-const display = (text: string, lookup: LinkLookup | null) => (lookup ? renderLinks(text, lookup).displayText : text);
-// JSON keeps `text` as stored and adds displayText and links.
-const withLinks = <T extends { text: string }>(item: T, lookup: LinkLookup | null) =>
-  lookup ? { ...item, ...renderLinks(item.text, lookup) } : item;
+const display = displayText;
 
 // ---- reads ----
-type PageTree = { page: PageDoc; nodes: TreeNode[]; loadWarning?: string | null };
-// A page tree with data-dump-excluded items (and their subtrees) removed.
-// `excludedNodeIds` lets writes refuse ids that point into a hidden subtree.
-type VisibleTree = PageTree & { excludedNodeIds: Set<string> };
 type NodeInfo = { nodeId: string; pageId: string | null; archived: boolean; pageArchived: boolean; parentNodeId: string | null; parentArchived: boolean };
 
-function visibleTree(result: PageTree): VisibleTree | null {
-  const visibility = getDataDumpVisibility(result.page, result.nodes);
-  if (visibility.pageExcluded) return null;
-  return { ...result, nodes: visibility.visibleNodes, excludedNodeIds: visibility.excludedNodeIds };
-}
+const visibleTree = (result: PageTree): VisibleTree | null => visiblePageTree(result);
 
 // Every command reads pages through here, so excluded pages and items never
 // reach the output or a write.
@@ -444,8 +434,7 @@ async function printStrays(pageId: string, nodes: TreeNode[], walk: (parent: str
   if (!shown.length) return;
   console.log(`\n## Stray items (${shown.length}): active, but the app can't place them under their parent`);
   for (const { node, why } of shown.sort((a, b) => a.node.position - b.node.position)) {
-    const box = node.kind === "task" ? (node.taskStatus === "done" ? "[x] " : "[ ] ") : "";
-    console.log(`- ${box}${display(node.text, lookup)}  (${node._id}; ${label[why]} ${node.parentNodeId})`);
+    console.log(outlineLine(node, 0, lookup, `${node._id}; ${label[why]} ${node.parentNodeId}`));
     walk(node._id, 1);
   }
 }
@@ -590,18 +579,8 @@ async function main() {
       if (flags.json) return print({ ...result, nodes: result.nodes.map((node) => withLinks(node, lookup)) });
       if (result.loadWarning) console.error(result.loadWarning);
       console.log(`# ${result.page.title}`);
-      const byParent = new Map<string | null, TreeNode[]>();
-      for (const node of result.nodes.filter((n) => !n.archived)) {
-        const list = byParent.get(node.parentNodeId) ?? [];
-        list.push(node);
-        byParent.set(node.parentNodeId, list);
-      }
       const walk = (parent: string | null, depth: number) => {
-        for (const node of (byParent.get(parent) ?? []).sort((a, b) => a.position - b.position)) {
-          const box = node.kind === "task" ? (node.taskStatus === "done" ? "[x] " : "[ ] ") : "";
-          console.log(`${"  ".repeat(depth)}- ${box}${display(node.text, lookup)}  (${node._id})`);
-          walk(node._id, depth + 1);
-        }
+        for (const line of outlineLines(result.nodes, lookup, parent, depth)) console.log(line);
       };
       walk(null, 0);
       return printStrays(rest[0], result.nodes, walk, lookup);
