@@ -170,9 +170,19 @@ test("a wrong owner key is refused and counts toward the lockout", async () => {
   const locking = await approve(t, clientId, "wrong");
   expect(locking).toMatchObject({ ok: false, error: "access_denied" });
   expect((locking as { lockedUntil: number | null }).lockedUntil).toBeGreaterThan(Date.now());
-  // Locked: even the right key is refused, and so is the app.
-  expect(await approve(t, clientId)).toMatchObject({ ok: false, error: "access_denied", description: expect.stringMatching(/Too many/) });
-  await expect(t.query(api.workspace.listPages, { ownerKey })).rejects.toThrow(/Too many/);
+  // Locked: wrong keys get the lockout message, but the right key still works.
+  expect(await approve(t, clientId, "wrong")).toMatchObject({ ok: false, error: "access_denied", description: expect.stringMatching(/Too many/) });
+  await expect(t.query(api.workspace.listPages, { ownerKey: "wrong" })).rejects.toThrow(/Too many/);
+  await t.query(api.workspace.listPages, { ownerKey });
+  expect(await approve(t, clientId)).toMatchObject({ ok: true });
+});
+
+test("a valid agent token keeps working while the owner key is locked out", async () => {
+  const t = convexTest(schema, modules);
+  const tokens = await connect(t);
+  for (let i = 0; i < 12; i += 1) await t.mutation(api.workspace.checkOwnerKey, { ownerKey: "wrong" });
+  await t.query(api.workspace.listPages, { ownerKey: tokens.accessToken });
+  await expect(t.query(api.workspace.listPages, { ownerKey: "mfa_at_bogus" })).rejects.toThrow();
 });
 
 async function seedWorkspace(t: T) {

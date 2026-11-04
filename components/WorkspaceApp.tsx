@@ -3943,10 +3943,27 @@ function ConfiguredWorkspace({
     context: FocusedOutlineContextValue;
   } | null>(null);
 
-  const isOwnerKeyValid = useQuery(
-    api.workspace.validateOwnerKey,
-    ownerKey ? { ownerKey } : SKIP,
-  );
+  // Checked once per key with the checkOwnerKey mutation, which counts a
+  // wrong key toward the lockout (a query can't). undefined while checking.
+  const checkOwnerKeyOnLoad = useMutation(api.workspace.checkOwnerKey);
+  const [ownerKeyCheck, setOwnerKeyCheck] = useState<{ key: string; valid: boolean } | null>(null);
+  useEffect(() => {
+    if (!ownerKey) {
+      return;
+    }
+    let cancelled = false;
+    void checkOwnerKeyOnLoad({ ownerKey })
+      .then((result) => {
+        if (!cancelled) {
+          setOwnerKeyCheck({ key: ownerKey, valid: result.valid });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [checkOwnerKeyOnLoad, ownerKey]);
+  const isOwnerKeyValid = ownerKeyCheck?.key === ownerKey ? ownerKeyCheck.valid : undefined;
   const pages = useQuery(
     api.workspace.listPages,
     ownerKey && isOwnerKeyValid ? { ownerKey, includeArchived: true } : SKIP,

@@ -12,7 +12,6 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { isOwnerKeyValid } from "./lib/auth";
 import { authorizeCaller } from "./lib/agentAuth";
 import {
   agentRefuseLanding,
@@ -26,7 +25,7 @@ import {
 import { listDataDumpExclusions as collectDataDumpExclusions, filterDataDumpNodes, isDataDumpExcluded } from "../lib/domain/dataDump";
 import {
   assertOwnerKeyGuarded,
-  isAuthLocked,
+  recordOwnerKeyFailure as recordOwnerKeyFailureCore,
   recordOwnerKeyValidation,
 } from "./lib/authThrottle";
 import {
@@ -2396,28 +2395,16 @@ export const refreshSidebarLinks = mutation({
   },
 });
 
-export const validateOwnerKey = query({
-  args: {
-    ownerKey: v.string(),
-  },
-  handler: async (ctx, args) => {
-    if (await isAuthLocked(ctx.db)) {
-      return false;
-    }
-    return isOwnerKeyValid(args.ownerKey);
-  },
-});
-
-// Actions have no db handle, so they read the lockout through this query
-// (see assertOwnerKeyGuardedInAction).
-export const getOwnerAccessLocked = internalQuery({
+// Actions and HTTP actions count a wrong owner key here, in its own
+// transaction, before they throw (see assertOwnerKeyGuardedInAction).
+export const recordOwnerKeyFailure = internalMutation({
   args: {},
-  handler: async (ctx) => await isAuthLocked(ctx.db),
+  handler: async (ctx) => await recordOwnerKeyFailureCore(ctx.db),
 });
 
-// Non-throwing owner-key check used by the unlock form. This is the only
-// endpoint that COUNTS failed attempts (a throwing mutation would roll back
-// its own failure write); every other endpoint enforces the resulting lock.
+// Non-throwing owner-key check used by the unlock form and on app load. It
+// counts a wrong key toward the lockout (returning instead of throwing keeps
+// that write); the correct key always succeeds. See convex/lib/authThrottle.ts.
 export const checkOwnerKey = mutation({
   args: {
     ownerKey: v.string(),

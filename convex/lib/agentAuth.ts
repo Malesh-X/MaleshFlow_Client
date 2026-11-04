@@ -32,9 +32,12 @@ export async function findValidAccessToken(db: DatabaseReader, token: string) {
 export async function authorizeCaller(db: DatabaseReader, key: string, fn: AgentFunctionName): Promise<Caller> {
   if (isAgentAccessToken(key)) {
     if (!(fn in AGENT_FUNCTIONS)) throw new Error("This function doesn't accept agent tokens.");
-    if (await isAuthLocked(db)) throw new Error("Too many failed access attempts. Try again later.");
+    // A valid token works even while the owner-key lockout is on.
     const found = await findValidAccessToken(db, key);
-    if (!found) throw new Error("Invalid, expired or revoked agent token.");
+    if (!found) {
+      if (await isAuthLocked(db)) throw new Error("Too many failed access attempts. Try again later.");
+      throw new Error("Invalid, expired or revoked agent token.");
+    }
     return { kind: "agent", grantId: found.grant._id, clientName: found.grant.clientName };
   }
   await assertOwnerKeyGuarded(db, key);
