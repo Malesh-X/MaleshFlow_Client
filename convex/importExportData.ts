@@ -11,6 +11,7 @@ import {
 } from "../lib/domain/dataDump";
 import { buildUniquePageSlug, enqueueNodeAiWork, syncLinksForNode } from "./lib/workspace";
 import { withGuards } from "./lib/guards";
+import { legacyFileDownloadUrl } from "./lib/legacyFileUrl";
 
 type DataDumpFile = {
   path: string;
@@ -542,7 +543,7 @@ export const buildDataDumpBundle = internalQuery({
         filePath: legacyFile.filePath,
         mimeType: legacyFile.mimeType,
         size: legacyFile.size,
-        downloadUrl: await ctx.storage.getUrl(legacyFile.storageId),
+        downloadUrl: legacyFileDownloadUrl(legacyFile._id),
       });
     }
 

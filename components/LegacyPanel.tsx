@@ -5,6 +5,7 @@ import { useAction, useMutation, useQuery } from "convex/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import { downloadBlob, fetchLegacyFile } from "@/lib/client/legacyFiles";
 
 const SKIP = "skip" as const;
 const LEGACY_VIEWER_PAGE_CHUNKS = 3;
@@ -295,6 +296,8 @@ export function LegacyPanel({
   const [uploadMessage, setUploadMessage] = useState("");
   const [uploadError, setUploadError] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
+  const [isDownloading, setIsDownloading] = useState(false);
   const [searchMode, setSearchMode] = useState<LegacySearchMode>("text");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -690,15 +693,24 @@ export function LegacyPanel({
                 ))}
               </select>
               {viewerFileResult?.downloadUrl ? (
-                <a
-                  href={viewerFileResult.downloadUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  download={viewerFile?.fileName}
+                <button
+                  type="button"
+                  disabled={isDownloading}
+                  title={downloadError || undefined}
+                  onClick={() => {
+                    const url = viewerFileResult.downloadUrl;
+                    if (!url) return;
+                    setIsDownloading(true);
+                    setDownloadError("");
+                    fetchLegacyFile(url, ownerKey)
+                      .then((blob) => downloadBlob(blob, viewerFile?.fileName ?? "legacy-file"))
+                      .catch((error: unknown) => setDownloadError(error instanceof Error ? error.message : "Download failed."))
+                      .finally(() => setIsDownloading(false));
+                  }}
                   className="inline-flex items-center justify-center border border-[var(--workspace-brand)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--workspace-brand)] transition hover:bg-[var(--workspace-brand)] hover:text-[var(--workspace-inverse-text)]"
                 >
-                  Download Original
-                </a>
+                  {downloadError ? "Download Failed" : isDownloading ? "Downloading..." : "Download Original"}
+                </button>
               ) : (
                 <span className="inline-flex items-center justify-center border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
                   Download

@@ -76,6 +76,7 @@ import {
   type RecurrenceFrequency,
   type RecurringCompletionMode,
 } from "@/lib/domain/recurrence";
+import { downloadBlob, fetchLegacyFile } from "@/lib/client/legacyFiles";
 import { parseNodeDraft, parseNodeDraftWithFallback } from "@/lib/domain/nodeDraft";
 import {
   SIDEBAR_SECTIONS,
@@ -1644,17 +1645,6 @@ function assertSafeZipPath(path: string) {
   ) {
     throw new Error(`Unsafe export path: ${path}`);
   }
-}
-
-function downloadBlob(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function flattenTreeNodes(nodes: TreeNode[], collapsedNodeIds?: Set<string>): TreeNode[] {
@@ -7939,12 +7929,14 @@ function ConfiguredWorkspace({
           current: index + 1,
           total: bundle.legacyFiles.length,
         });
-        const response = await fetch(legacyFile.downloadUrl);
-        if (!response.ok) {
+        let blob: Blob;
+        try {
+          blob = await fetchLegacyFile(legacyFile.downloadUrl, ownerKey);
+        } catch {
           throw new Error(`Could not fetch legacy file: ${legacyFile.filePath}`);
         }
 
-        zip.file(legacyFile.path, await response.blob());
+        zip.file(legacyFile.path, blob);
       }
 
       setDataDumpExportProgress({

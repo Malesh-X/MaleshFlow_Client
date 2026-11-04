@@ -3,6 +3,7 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import type { Doc, Id } from "./_generated/dataModel";
 import { assertOwnerKeyGuarded } from "./lib/authThrottle";
 import { withGuards } from "./lib/guards";
+import { legacyFileDownloadUrl } from "./lib/legacyFileUrl";
 
 const LEGACY_SEARCH_SNIPPET_RADIUS = 160;
 
@@ -148,7 +149,7 @@ export const getLegacyFileViewer = query({
 
     return {
       file,
-      downloadUrl: await ctx.storage.getUrl(file.storageId),
+      downloadUrl: legacyFileDownloadUrl(file._id),
     };
   },
 });
@@ -249,6 +250,19 @@ export const searchLegacyText = query({
         };
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  },
+});
+
+// For the authenticated download route (convex/http.ts). Takes a string so a
+// malformed id is a 404, not a validator error.
+export const getLegacyFileForDownload = internalQuery({
+  args: {
+    fileId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const id = ctx.db.normalizeId("legacyFiles", args.fileId);
+    const file = id ? await ctx.db.get(id) : null;
+    return file ? { storageId: file.storageId, fileName: file.fileName, mimeType: file.mimeType } : null;
   },
 });
 
