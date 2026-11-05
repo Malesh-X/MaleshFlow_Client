@@ -32,7 +32,11 @@ export const GUARDED_MUTATIONS: Record<string, GuardedEntry> = {
   "workspace:deleteNode": { checks: "node deletable" },
   "workspace:completeTaskPageTask": { checks: "node status editable (legacy adapter for old tabs)" },
   "workspace:setRecurrenceBasis": { checks: "node schedule editable" },
-  "workspace:setNodeCompletion": { checks: "node status editable; planner page writable for previews", via: ["runNodeCompletion"] },
+  "workspace:setNodeCompletion": { checks: "node status editable; planner page writable for previews", via: ["runCompletionWithReceipt", "runNodeCompletion"] },
+  "workspace:setNodesCompletion": {
+    checks: "per item, the same as setNodeCompletion: node status editable; planner page writable for previews",
+    via: ["runCompletionWithReceipt", "runNodeCompletion"],
+  },
   "workspace:undoTextEditAndCompletion": {
     checks: "the text edit goes through updateNode's checks (node editable, schedule) after the receipt's own checks",
     via: ["applyNodeUpdate"],

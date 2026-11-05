@@ -74,6 +74,7 @@ import {
   completePlannerLinkedTask,
   completePlannerSourceTaskInstance,
 } from "./lib/planner";
+import { MAX_COMPLETION_BATCH } from "../lib/domain/completionBatch";
 import { replaceLiteralOccurrences } from "../lib/domain/findReplace";
 import { parseNodeDraftWithFallback } from "../lib/domain/nodeDraft";
 import {
@@ -122,6 +123,7 @@ import { changeForUpdate } from "./lib/guardRules";
 import { isValidTimeZone } from "../lib/domain/timeZone";
 import { getSourceOccurrenceIndex, withNextSourceOccurrence } from "../lib/domain/planner";
 import {
+  completionStateMatches,
   getNodeMeta,
   isNodeCompleted,
   isPlannerCompletionItem,
@@ -5384,6 +5386,22 @@ async function runNodeCompletion(ctx: MutationCtx, args: CompletionArgs) {
 // keep getting no inline receipt for those.
 const INLINE_RECEIPT_ROUTES = new Set<CompletionRoute>(["planner", "plannerPreview", "taskPage"]);
 
+// One item's completion with its stored undo receipt: the per-item step of
+// setNodeCompletion and setNodesCompletion.
+async function runCompletionWithReceipt(ctx: MutationCtx, args: CompletionArgs) {
+  return await runWithReceipt(
+    ctx,
+    {
+      action: "completion",
+      targetNodeId: args.nodeId,
+      completionMode: args.completionMode,
+      intent: args.intent,
+      ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
+    },
+    () => runNodeCompletion(ctx, args),
+  );
+}
+
 // One server path for the checkbox, `flow done` and `update --status done`
 // (Phase 3, change 2; routing in runNodeCompletion). An applied completion
 // returns `receiptId`, a stored receipt for workspace:undoCompletion.
@@ -5401,26 +5419,118 @@ export const setNodeCompletion = mutation({
     const caller = await authorizeCaller(ctx.db, args.ownerKey, "workspace:setNodeCompletion");
     await agentRefuseNodes(ctx.db, caller, [args.nodeId]);
     await agentRefusePage(ctx.db, caller, args.plannerPageId);
-    const result = await runWithReceipt(
-      ctx,
-      {
-        action: "completion",
-        targetNodeId: args.nodeId,
-        completionMode: args.completionMode,
-        intent: args.intent,
-        ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
-      },
-      () =>
-        runNodeCompletion(ctx, {
-          nodeId: args.nodeId,
-          intent: args.intent,
-          completionMode: args.completionMode,
-          expectedRevision: args.expectedRevision,
-          ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
-        }),
-    );
+    const result = await runCompletionWithReceipt(ctx, {
+      nodeId: args.nodeId,
+      intent: args.intent,
+      completionMode: args.completionMode,
+      expectedRevision: args.expectedRevision,
+      ...(args.plannerPageId ? { plannerPageId: args.plannerPageId } : {}),
+    });
     const inline = result.receipt && result.receiptId && INLINE_RECEIPT_ROUTES.has(result.route);
     return { ...result, receipt: inline ? { ...result.receipt!, receiptId: result.receiptId as string } : null };
+  },
+});
+
+// The app's multi-item check-off (Cmd+Enter on a selection) in one
+// transaction. Each item goes through the same step as setNodeCompletion
+// (runCompletionWithReceipt), in the order given, so routing, roll-forward,
+// planner and Done archives, occurrence tokens and the per-task basis match
+// checking them off one by one. All or nothing:
+// - if any item's revision is not the one the caller saw, nothing is written
+//   and the answer is "stale" with each conflict's current state (the app
+//   retries once when its view still matches, as with setNodeCompletion);
+// - an item an earlier item in the batch already changed is completed only if
+//   it still looks the way the caller saw it, otherwise it is skipped;
+// - any error rolls the whole batch back.
+// Each applied item stores its own receipt; the app undoes them as one step.
+export const setNodesCompletion = mutation({
+  args: {
+    ownerKey: v.string(),
+    items: v.array(
+      v.object({
+        nodeId: v.id("nodes"),
+        intent: v.union(v.literal("complete"), v.literal("reopen")),
+        expectedRevision: v.number(),
+        plannerPageId: v.optional(v.id("pages")),
+      }),
+    ),
+    completionMode: v.optional(v.union(v.literal("dueDate"), v.literal("today"))),
+  },
+  handler: async (rawCtx, args) => {
+    const ctx = withGuards(rawCtx, "workspace:setNodesCompletion");
+    await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
+    if (args.items.length > MAX_COMPLETION_BATCH) {
+      throw new ConvexError(`Select at most ${MAX_COMPLETION_BATCH} items to check off at once.`);
+    }
+    const completionMode = args.completionMode ?? DEFAULT_COMPLETION_MODE;
+    const seenIds = new Set<string>();
+    const items = args.items.filter((item) => {
+      if (seenIds.has(item.nodeId as string)) return false;
+      seenIds.add(item.nodeId as string);
+      return true;
+    });
+
+    const seen = new Map<string, Doc<"nodes">>();
+    const conflicts: Array<{ nodeId: Id<"nodes">; before: ReturnType<typeof completionSnapshot> }> = [];
+    for (const item of items) {
+      const node = await ctx.db.get(item.nodeId);
+      if (!node) {
+        throw new ConvexError("Item not found.");
+      }
+      if ((node.revision ?? 0) !== item.expectedRevision) {
+        conflicts.push({ nodeId: item.nodeId, before: completionSnapshot(node) });
+      }
+      seen.set(item.nodeId as string, node);
+    }
+    if (conflicts.length > 0) {
+      return {
+        status: "stale" as const,
+        message: conflicts.length === 1 ? "An item changed elsewhere. Nothing was checked off." : `${conflicts.length} items changed elsewhere. Nothing was checked off.`,
+        conflicts,
+        results: [],
+        receiptIds: [],
+      };
+    }
+
+    const results = [];
+    for (const item of items) {
+      const before = seen.get(item.nodeId as string)!;
+      const current = await ctx.db.get(item.nodeId);
+      if (!current) {
+        throw new ConvexError("Item not found.");
+      }
+      const currentRevision = current.revision ?? 0;
+      if (currentRevision !== (before.revision ?? 0) && !completionStateMatches(before, completionSnapshot(current))) {
+        // An earlier item in this batch already changed it (a planner copy's
+        // source, a child archived with its parent).
+        results.push({ nodeId: item.nodeId, status: "stale" as const, route: "none" as const, receiptId: null, before: completionSnapshot(current), after: completionSnapshot(current), movesItem: false });
+        continue;
+      }
+      const result = await runCompletionWithReceipt(ctx, {
+        nodeId: item.nodeId,
+        intent: item.intent,
+        completionMode,
+        expectedRevision: currentRevision,
+        ...(item.plannerPageId ? { plannerPageId: item.plannerPageId } : {}),
+      });
+      results.push({
+        nodeId: item.nodeId,
+        status: result.status,
+        route: result.route,
+        receiptId: result.receiptId as string | null,
+        before: result.before,
+        after: result.after,
+        movesItem: result.status === "applied" && result.receipt !== null && INLINE_RECEIPT_ROUTES.has(result.route),
+      });
+    }
+    const receiptIds = results.flatMap((result) => (result.receiptId ? [result.receiptId] : []));
+    return {
+      status: receiptIds.length > 0 ? ("applied" as const) : ("noop" as const),
+      message: null,
+      conflicts: [],
+      results,
+      receiptIds,
+    };
   },
 });
 

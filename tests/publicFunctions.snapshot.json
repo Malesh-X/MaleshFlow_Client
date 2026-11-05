@@ -131,6 +131,7 @@
   "workspace:setNodeDataDumpExcluded (mutation)",
   "workspace:setNodeTreeArchived (mutation)",
   "workspace:setNodeTreesArchivedBatch (mutation)",
+  "workspace:setNodesCompletion (mutation)",
   "workspace:setPageDataDumpExcluded (mutation)",
   "workspace:setPagePinnedInAllSidebar (mutation)",
   "workspace:setPlannerScanExcluded (mutation)",

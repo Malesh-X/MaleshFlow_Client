@@ -77,6 +77,11 @@ import {
   type RecurringCompletionMode,
 } from "@/lib/domain/recurrence";
 import { downloadBlob, fetchLegacyFile } from "@/lib/client/legacyFiles";
+import {
+  MAX_COMPLETION_BATCH,
+  completeNodesInOneCall,
+  type CompletionBatchResult,
+} from "@/lib/domain/completionBatch";
 import { parseNodeDraft, parseNodeDraftWithFallback } from "@/lib/domain/nodeDraft";
 import {
   SIDEBAR_SECTIONS,
@@ -4186,6 +4191,7 @@ function ConfiguredWorkspace({
   );
   const setPageDataDumpExcludedRaw = useMutation(api.workspace.setPageDataDumpExcluded);
   const setNodeCompletionRaw = useMutation(api.workspace.setNodeCompletion);
+  const setNodesCompletionRaw = useMutation(api.workspace.setNodesCompletion);
   const forceArchiveTaskPageItemRaw = useMutation(api.workspace.forceArchiveTaskPageItem);
   const setModelPageCustomPrompt = useMutation(api.workspace.setModelPageCustomPrompt);
   const setWorkspaceSettings = useMutation(api.workspace.setWorkspaceSettings);
@@ -4269,6 +4275,18 @@ function ConfiguredWorkspace({
   const setNodeCompletionMutation = setNodeCompletionRaw.withOptimisticUpdate(
     (localStore, args) => {
       applyOptimisticNodeCompletion(localStore, args);
+    },
+  );
+  // Every item shows its asked-for state at once, while the one batch call runs.
+  const setNodesCompletionMutation = setNodesCompletionRaw.withOptimisticUpdate(
+    (localStore, args) => {
+      for (const item of args.items) {
+        applyOptimisticNodeCompletion(localStore, {
+          ownerKey: args.ownerKey,
+          completionMode: args.completionMode ?? "dueDate",
+          ...item,
+        });
+      }
     },
   );
   const updateNodeMutation = updateNodeRaw.withOptimisticUpdate((localStore, args) => {
@@ -4587,6 +4605,30 @@ function ConfiguredWorkspace({
         "Could not update that item.",
       ),
     [ownerKey, recurringCompletionMode, runTrackedMutation, setNodeCompletionChecked],
+  );
+  // Several items in one workspace:setNodesCompletion call (Cmd+Enter on a
+  // selection; retry rule in completeNodesInOneCall). A refused batch writes
+  // nothing and shows the server's message.
+  const completeNodes = useCallback(
+    async (nodes: CompletableNode[]): Promise<CompletionBatchResult> => {
+      const result = await completeNodesInOneCall(nodes, (items) =>
+        runTrackedMutation(
+          async () =>
+            (await setNodesCompletionMutation({
+              ownerKey,
+              items: items.map((item) => ({ ...item, nodeId: item.nodeId as Id<"nodes"> })),
+              completionMode: recurringCompletionMode,
+            })) as CompletionBatchResult,
+          { nodeIds: items.map((item) => item.nodeId) },
+          "Could not update those items.",
+        ),
+      );
+      if (result.status === "stale") {
+        setSyncErrorMessage(result.message ?? "Some items changed elsewhere. Nothing was checked off.");
+      }
+      return result;
+    },
+    [ownerKey, recurringCompletionMode, runTrackedMutation, setNodesCompletionMutation],
   );
   const findNodesText = useAction(api.ai.findNodesText);
   const searchNodes = useAction(api.ai.searchNodes);
@@ -9910,32 +9952,42 @@ function ConfiguredWorkspace({
       return;
     }
 
-    // Each item goes through workspace:setNodeCompletion, which routes it
-    // (planner, task page Done archive, recurring, note, plain task). One undo
-    // step covers them all.
-    const receiptIds: string[] = [];
-    let clearSelection = false;
-    let firstPageId: Id<"pages"> | null = null;
-    let lastNodeId: string | null = null;
+    // One workspace:setNodesCompletion call routes every item the way
+    // setNodeCompletion would (planner, task page Done archive, recurring,
+    // note, plain task). One undo step covers them all.
+    const nodes: Doc<"nodes">[] = [];
     for (const nodeId of orderedSelectedNodeIds) {
       const node = workspaceNodeMap.get(nodeId);
       if (!node || isNodeLocked(node)) {
         continue;
       }
-
       const page = pagesById.get(node.pageId as string);
       if (page?.archived) {
         continue;
       }
+      nodes.push(node);
+    }
+    if (nodes.length === 0) {
+      return;
+    }
+    if (nodes.length > MAX_COMPLETION_BATCH) {
+      setSyncErrorMessage(`Select at most ${MAX_COMPLETION_BATCH} items to check off at once.`);
+      return;
+    }
 
-      const result = await completeNode(node, completionIntentFor(node));
+    const batch = await completeNodes(nodes);
+    const receiptIds: string[] = [];
+    let clearSelection = false;
+    let firstPageId: Id<"pages"> | null = null;
+    let lastNodeId: string | null = null;
+    for (const result of batch.results) {
       if (result.status !== "applied" || !result.receiptId) {
         continue;
       }
       receiptIds.push(result.receiptId);
-      firstPageId ??= node.pageId as Id<"pages">;
-      lastNodeId = nodeId;
-      if (completionMovesItem(result)) {
+      firstPageId ??= (workspaceNodeMap.get(result.nodeId as string)?.pageId as Id<"pages"> | undefined) ?? null;
+      lastNodeId = result.nodeId as string;
+      if (result.movesItem) {
         // Planner and Done-archive completions move the item away.
         clearSelection = true;
       }
@@ -9960,7 +10012,7 @@ function ConfiguredWorkspace({
     if (!clearSelection && receiptIds.length === 1 && lastNodeId) {
       selectSingleNode(lastNodeId);
     }
-  }, [clearNodeSelection, completeNode, history, pagesById, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
+  }, [clearNodeSelection, completeNodes, history, pagesById, selectSingleNode, selectedNodeIds, visibleNodeOrder, workspaceNodeMap]);
 
   const deleteHighlightedNodes = useCallback(async () => {
     if (selectedNodeIds.size === 0) {
