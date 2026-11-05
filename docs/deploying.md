@@ -54,3 +54,23 @@ UPDATE_PUBLIC_FUNCTIONS_SNAPSHOT=1 npm run -s test:unit
 
 Use `useWorkspaceQuery`, not `useQuery` from `convex/react`, in app
 components.
+
+## Write guards
+
+The server guards (convex/lib/guards.ts) refuse invalid writes. A refused
+write throws a `guardRefused` ConvexError that rolls back the mutation, so
+the caller logs it with `guardViolations:reportRefusal`: the app shows a
+short "Not saved: ..." notice in the status banner, and the CLI and MCP
+print the message. `flow doctor` lists refusals by mutation, guard and caller.
+
+To go back to logging without a deploy (for example if a legitimate action
+is refused):
+
+```bash
+npx convex env set GUARD_MODE_OVERRIDE record --prod
+```
+
+Remove it with `npx convex env remove GUARD_MODE_OVERRIDE --prod` once the
+guard is fixed. Mutations that only old tabs call stay in record mode
+(`LEGACY_RECORD_ONLY_MUTATIONS` in convex/lib/guardRules.ts, checked by
+tests/guardCoverage.test.ts); remove them from that list when they are retired.

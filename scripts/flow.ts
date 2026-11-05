@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ConvexHttpClient } from "convex/browser";
 import { ConvexError } from "convex/values";
+import { reportGuardRefusal } from "../lib/domain/guardRefusal";
 import { anyApi } from "convex/server";
 import {
   EXCLUDED_ITEM_MESSAGE,
@@ -268,7 +269,13 @@ const mutation = async (path: string, args: object = {}): Promise<unknown> => {
   }
   if (prod && !flags.yes) fail("Refusing to write to production without --yes (try --dry-run first).");
   const { client, key } = connect();
-  return client.mutation(fn(path), { ownerKey: key, ...args });
+  try {
+    return await client.mutation(fn(path), { ownerKey: key, ...args });
+  } catch (error) {
+    // The refused mutation rolled back its own log row (lib/domain/guardRefusal.ts).
+    await reportGuardRefusal(error, "cli", (report) => client.mutation(fn("guardViolations:reportRefusal"), { ownerKey: key, ...report }));
+    throw error;
+  }
 };
 const print = (value: unknown) => console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
 const ok = (value?: unknown) => (dryRun ? console.log("(dry run: nothing was sent)") : print(value ?? "ok"));
@@ -496,8 +503,17 @@ async function doctor() {
     report.strayItems.push({ pageId: page._id, pageTitle: page.title, nodeId: node._id, text: node.text, detail: `parent ${node.parentNodeId} ${why}${where}` });
   }
 
-  // Writes the server guards flagged (record mode logs instead of refusing).
-  type GuardViolations = { mode: string; total: number; truncated: boolean; counts: Record<string, number>; recent: { mutation: string; guard: string; nodeId: string | null; pageId: string | null; detail: string; createdAt: number }[] };
+  // Writes the server guards flagged: logged in record mode, refused (and
+  // reported by the caller) in enforce mode.
+  type GuardViolations = {
+    mode: string;
+    total: number;
+    truncated: boolean;
+    counts: Record<string, number>;
+    // Older deployments return counts only.
+    groups?: { key: string; count: number; first: number; last: number }[];
+    recent: { mutation: string; guard: string; mode?: string; caller?: string | null; nodeId: string | null; pageId: string | null; detail: string; createdAt: number }[];
+  };
   let guards: GuardViolations | null = null;
   try {
     guards = (await query("guardViolations:list", { limit })) as GuardViolations;
@@ -546,9 +562,15 @@ async function doctor() {
   }
   if (!guards) return console.log("Guard violations: not available (this deployment has no guardViolations:list yet)");
   console.log(`Guard violations (server guards in ${guards.mode} mode): ${guards.total}${guards.truncated ? "+" : ""}`);
-  for (const [key, count] of Object.entries(guards.counts).sort((a, b) => b[1] - a[1])) console.log(`  ${count}  ${key}`);
+  const iso = (time: number) => new Date(time).toISOString();
+  if (guards.groups) {
+    for (const group of guards.groups) console.log(`  ${group.count}  ${group.key}  (${iso(group.first)} to ${iso(group.last)})`);
+  } else {
+    for (const [key, count] of Object.entries(guards.counts).sort((a, b) => b[1] - a[1])) console.log(`  ${count}  ${key}`);
+  }
   for (const row of guards.recent.slice(0, limit)) {
-    console.log(`  - ${new Date(row.createdAt).toISOString()} ${row.mutation} ${row.guard}${row.nodeId ? ` node ${row.nodeId}` : ""}${row.pageId ? ` page ${row.pageId}` : ""}: ${row.detail}`);
+    const how = row.mode === "enforce" ? ` refused${row.caller ? ` (${row.caller})` : ""}` : "";
+    console.log(`  - ${iso(row.createdAt)} ${row.mutation} ${row.guard}${how}${row.nodeId ? ` node ${row.nodeId}` : ""}${row.pageId ? ` page ${row.pageId}` : ""}: ${row.detail}`);
   }
 }
 

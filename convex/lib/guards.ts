@@ -11,11 +11,13 @@
 // unchanged; in "enforce" mode it throws a ConvexError (or, for schedules,
 // the write is normalized). The mode lives in ./guardRules.ts.
 import { ConvexError } from "convex/values";
+import { GUARD_REFUSED_CODE } from "../../lib/domain/guardRefusal";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import {
-  GUARD_MODE,
   applyScheduleFixes,
+  currentGuardMode,
+  guardModeFor,
   checkSchedule,
   nodeEditProblem,
   pageWriteProblem,
@@ -77,7 +79,7 @@ export function withGuards(ctx: MutationCtx, mutation: string, options: { mode?:
     for (const scope of writeScopes) if (!scope.has(nodeId)) scope.set(nodeId, revisionBefore);
   };
   const wrapped = { ...ctx, db: withNodeRevisions(ctx.db, noteWrite) } as MutationCtx;
-  guardStates.set(wrapped, { mutation, mode: options.mode ?? GUARD_MODE, recorded: 0, writeScopes });
+  guardStates.set(wrapped, { mutation, mode: options.mode ?? guardModeFor(mutation), recorded: 0, writeScopes });
   return wrapped;
 }
 
@@ -94,7 +96,7 @@ export function trackNodeWrites(ctx: MutationCtx) {
 function stateOf(ctx: MutationCtx): GuardState {
   let state = guardStates.get(ctx);
   if (!state) {
-    state = { mutation: "unknown", mode: GUARD_MODE, recorded: 0, writeScopes: new Set() };
+    state = { mutation: "unknown", mode: currentGuardMode(), recorded: 0, writeScopes: new Set() };
     guardStates.set(ctx, state);
   }
   return state;
@@ -132,14 +134,28 @@ async function violation(
   ids: { nodeId?: string | null; pageId?: string | null },
   detail?: string,
 ) {
-  if (stateOf(ctx).mode === "enforce") throw new ConvexError(message);
+  const state = stateOf(ctx);
+  if (state.mode === "enforce") {
+    // The throw rolls back this mutation, log rows included, so the caller
+    // reports it (guardViolations:reportRefusal; lib/domain/guardRefusal.ts).
+    throw new ConvexError({
+      code: GUARD_REFUSED_CODE,
+      mutation: state.mutation,
+      guard,
+      message,
+      detail: (detail ?? message).slice(0, 500),
+      nodeId: ids.nodeId ?? null,
+      pageId: ids.pageId ?? null,
+    });
+  }
   await record(ctx, guard, ids, detail ?? message);
 }
 
 // The page must exist, not be archived and not be pending deletion.
-export async function assertPageWritable(ctx: MutationCtx, pageId: Id<"pages">) {
+// `allowArchived` is for settings that apply to archived pages too (data dump exclusion).
+export async function assertPageWritable(ctx: MutationCtx, pageId: Id<"pages">, options: { allowArchived?: boolean } = {}) {
   const page = await ctx.db.get(pageId);
-  const problem = pageWriteProblem(page);
+  const problem = pageWriteProblem(page, options);
   if (problem) await violation(ctx, "assertPageWritable", problem, { pageId });
   return page;
 }

@@ -96,6 +96,7 @@ export const EXEMPT_MUTATIONS: Record<string, string> = {
     "Legacy undo adapter for old tabs. Receipts with a receiptId go through the checked undo (see workspace:undoCompletion); older ones restore recorded before-states as before.",
   "workspace:undoCompletion":
     "Undo has to restore what a completion archived or changed, including archived items and locked planner days that the guards refuse to edit. Instead it runs its own checks (convex/lib/undoReceipts.ts): every touched item must be at the revision the completion left and every subtree it deletes or restores must have the same members, or it refuses and changes nothing.",
+  "guardViolations:reportRefusal": "Writes only the guardViolations log: a refused write's report from the app, CLI or MCP server.",
   "chatData:ensureChatThread": "Chat tables only.",
   "calendar:ensureTaskCalendarFeed": "Calendar feed table only.",
   "calendar:rotateTaskCalendarFeed": "Calendar feed table only.",

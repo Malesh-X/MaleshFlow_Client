@@ -88,6 +88,15 @@ export function isNodeLocked(node: MetaHolder) {
   return typeof meta.sectionSlot === "string" || meta.plannerKind === "plannerDay";
 }
 
+// The ids a cut or a move can act on: section headers and planner days stay
+// put (the server refuses moving or archiving them). Unknown ids pass through.
+export function withoutLockedNodeIds<T>(nodeIds: readonly T[], lookup: (nodeId: T) => MetaHolder | undefined) {
+  return nodeIds.filter((nodeId) => {
+    const node = lookup(nodeId);
+    return !node || !isNodeLocked(node);
+  });
+}
+
 export function isPlannerLinkedTaskCopy(node: MetaHolder) {
   const meta = getNodeMeta(node);
   return meta.plannerKind === "plannerLinkedTask" && typeof meta.sourceTaskNodeId === "string" && meta.sourceTaskNodeId.length > 0;

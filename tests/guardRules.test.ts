@@ -15,8 +15,8 @@ import {
 const page = (extra: Record<string, unknown> = {}) => ({ archived: false, sourceMeta: {}, ...extra });
 const locked = { sourceMeta: { locked: true, sectionSlot: "noteMain" } };
 
-test("guards ship in record mode", () => {
-  assert.equal(GUARD_MODE, "record");
+test("guards enforce", () => {
+  assert.equal(GUARD_MODE, "enforce");
 });
 
 test("isLockedNode matches the app's rule", () => {

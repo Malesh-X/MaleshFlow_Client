@@ -242,7 +242,7 @@ dumps (see above). It reports:
 | Recurring items with no due date | Recurrence set but nothing to roll forward from. |
 | End date not after the due date | `dueEndAt` on or before `dueAt`, or with no due date. |
 | Pages too large to check fully | The page tree was capped, so results for that page may be incomplete. |
-| Guard violations | Writes the server guards flagged (`guardViolations:list`), with counts per mutation and guard. In record mode (the default) a flagged write still goes through; see docs/server-logic-plan.md, Phase 2. |
+| Guard violations | Writes the server guards flagged (`guardViolations:list`), grouped by mutation, guard and caller with first and last times. The guards enforce: a bad write is refused with a clear message and the caller (`app`, `cli` or `mcp`) logs it as `refused`. Mutations only old tabs call (`LEGACY_RECORD_ONLY_MUTATIONS` in convex/lib/guardRules.ts) still log and write. |
 
 Repairs are a separate step that the owner approves (Phase 5 of
 docs/server-logic-plan.md).

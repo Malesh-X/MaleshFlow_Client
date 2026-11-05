@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { completionIntentFor, completionStateMatches } from "../lib/domain/workspaceRules";
+import { completionIntentFor, completionStateMatches, withoutLockedNodeIds } from "../lib/domain/workspaceRules";
 
 const state = (over: Partial<Parameters<typeof completionStateMatches>[1]> = {}) => ({
   revision: 5,
@@ -42,4 +42,13 @@ test("completionStateMatches tells occurrences apart even when status and dates 
   assert.equal(completionStateMatches(seen, state({ occurrenceIndex: 3 })), false);
   assert.equal(completionStateMatches({ ...seen, sourceMeta: {} }, state({ occurrenceIndex: 0 })), true);
   assert.equal(completionStateMatches({ ...seen, sourceMeta: {} }, state({ occurrenceIndex: 1 })), false);
+});
+
+test("withoutLockedNodeIds keeps section headers and planner days out of cuts and moves", () => {
+  const nodes: Record<string, { sourceMeta: Record<string, unknown> }> = {
+    header: { sourceMeta: { locked: true, sectionSlot: "noteMain" } },
+    day: { sourceMeta: { locked: true, plannerKind: "plannerDay" } },
+    item: { sourceMeta: {} },
+  };
+  assert.deepEqual(withoutLockedNodeIds(["header", "item", "day", "missing"], (id) => nodes[id]), ["item", "missing"]);
 });

@@ -466,6 +466,9 @@ export default defineSchema({
     nodeId: v.optional(v.string()),
     pageId: v.optional(v.string()),
     detail: v.string(),
+    // Who reported a refused write in enforce mode: "app", "cli" or "mcp".
+    // Absent on rows the guards log themselves in record mode.
+    caller: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_createdAt", ["createdAt"]),
   // Stored undo receipts for completions (Phase 4). A receipt holds what the

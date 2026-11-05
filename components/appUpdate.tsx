@@ -115,7 +115,9 @@ export function reloadNow() {
   window.location.reload();
 }
 
-const SERVER_HEALTH: ConvexHealthSnapshot = { problem: null, lastFailedWriteAt: null };
+const SERVER_HEALTH: ConvexHealthSnapshot = { problem: null, lastFailedWriteAt: null, refusal: null };
+// How long a "Not saved" notice for a refused write stays up.
+const REFUSAL_NOTICE_MS = 6_000;
 const getServerHealth = () => SERVER_HEALTH;
 
 export function useConvexHealth() {
@@ -247,6 +249,15 @@ export function StaleTabWatcher({ client }: { client: ConvexReactClient | null }
     return () => window.clearInterval(poll);
   }, [check, hasProblem]);
 
+  const refusalAt = health.refusal?.at ?? null;
+  useEffect(() => {
+    if (refusalAt === null) {
+      return;
+    }
+    const timeout = window.setTimeout(() => convexHealth.clearRefusal(refusalAt), REFUSAL_NOTICE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [refusalAt]);
+
   return <AppStatusBanner health={health} stale={showNotice} />;
 }
 
@@ -260,6 +271,18 @@ export function AppStatusBanner({
   stale: boolean;
 }) {
   if (!health.problem && !stale) {
+    // A refused write: the change was checked and turned down, so there is
+    // nothing to reload. The editor keeps its text.
+    if (health.refusal) {
+      return (
+        <div
+          role="status"
+          className="fixed bottom-4 right-4 z-[1000] max-w-[calc(100vw-2rem)] border border-[var(--workspace-danger)]/60 bg-[var(--workspace-surface)] px-3 py-2 text-sm text-[var(--workspace-text)] shadow-lg"
+        >
+          {health.refusal.message}
+        </div>
+      );
+    }
     return null;
   }
   const message =

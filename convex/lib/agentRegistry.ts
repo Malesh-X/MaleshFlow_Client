@@ -24,6 +24,7 @@ export const AGENT_FUNCTIONS = {
   "workspace:setNodeCompletion": { hiding: "refuses a hidden item or an excluded planner page" },
   "workspace:undoCompletion": { hiding: "refuses a receipt that touches a hidden item" },
   "workspace:moveNodeTree": { hiding: "refuses hidden items, an excluded destination, and moves that would land hidden" },
+  "guardViolations:reportRefusal": { hiding: "logs a refused write; reads and returns nothing", noContent: true },
 } satisfies Record<string, AgentEntry>;
 
 export type AgentFunctionName = keyof typeof AGENT_FUNCTIONS;

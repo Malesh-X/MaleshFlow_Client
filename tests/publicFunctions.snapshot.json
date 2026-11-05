@@ -12,6 +12,7 @@
   "chatData:getChatThread (query)",
   "chatData:getWorkspaceKnowledgeThread (query)",
   "guardViolations:list (query)",
+  "guardViolations:reportRefusal (mutation)",
   "importExport:exportDataDump (action)",
   "importExport:exportWorkspace (action)",
   "importExport:importMarkdownBundle (action)",

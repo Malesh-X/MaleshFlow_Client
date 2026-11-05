@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXEMPT_MUTATIONS, GUARDED_MUTATIONS, GUARD_FUNCTION_NAMES } from "../convex/lib/guardRegistry";
+import { LEGACY_RECORD_ONLY_MUTATIONS } from "../convex/lib/guardRules";
 import { AGENT_FUNCTIONS, AGENT_HIDING_FUNCTION_NAMES, type AgentEntry } from "../convex/lib/agentRegistry";
 import { RETIRED_PUBLIC_FUNCTIONS } from "../convex/lib/retiredStubs";
 
@@ -51,6 +52,26 @@ test("every public mutation is guarded or exempt, never both", () => {
   assert.deepEqual(both, []);
   const stale = [...Object.keys(GUARDED_MUTATIONS), ...Object.keys(EXEMPT_MUTATIONS)].filter((name) => !blocks.has(name));
   assert.deepEqual(stale, [], `Not public mutations (remove from the registry): ${stale.join(", ")}`);
+});
+
+// Legacy mutations stay in record mode because only old tabs call them. If the
+// app, CLI or MCP server starts calling one, it must be enforced again.
+test("legacy record-only mutations have no current caller", () => {
+  const callerFiles = (dir: string): string[] =>
+    readdirSync(join(process.cwd(), dir), { withFileTypes: true }).flatMap((entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) return callerFiles(path);
+      return /\.(ts|tsx)$/.test(entry.name) ? [path] : [];
+    });
+  const callers = ["components", "lib", "scripts", "app"].flatMap(callerFiles).map((path) => [path, readFileSync(join(process.cwd(), path), "utf8")] as const);
+  const blocks = mutationBlocks();
+  for (const name of LEGACY_RECORD_ONLY_MUTATIONS) {
+    assert.ok(blocks.has(name), `${name} is not a public mutation`);
+    const [module, fn] = name.split(":");
+    const pattern = new RegExp(`api\\.${module}\\.${fn}\\b|"${module}:${fn}"`);
+    const used = callers.filter(([, source]) => pattern.test(source)).map(([path]) => path);
+    assert.deepEqual(used, [], `${name} is called by ${used.join(", ")}; remove it from LEGACY_RECORD_ONLY_MUTATIONS`);
+  }
 });
 
 test("every exemption has a reason", () => {

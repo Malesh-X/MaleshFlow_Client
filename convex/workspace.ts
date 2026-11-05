@@ -1998,7 +1998,8 @@ async function listScopedFindReplaceNodes(
 ) {
   if (pageId) {
     const page = await db.get(pageId);
-    if (!page || isPagePendingDeletion(page)) {
+    // Archived pages are read-only (and skipped in the all-pages scope too).
+    if (!page || page.archived || isPagePendingDeletion(page)) {
       return {
         pagesById: new Map<Id<"pages">, Doc<"pages">>(),
         nodes: [] as Doc<"nodes">[],
@@ -4943,7 +4944,8 @@ export const setPageDataDumpExcluded = mutation({
   handler: async (rawCtx, args) => {
     const ctx = withGuards(rawCtx, "workspace:setPageDataDumpExcluded");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
-    await assertPageWritable(ctx, args.pageId);
+    // Excluding an archived page from data dumps is allowed (the exclusions list shows them).
+    await assertPageWritable(ctx, args.pageId, { allowArchived: true });
 
     const page = await ctx.db.get(args.pageId);
     if (!page || isSidebarSpecialPage(page) || isPagePendingDeletion(page)) {
@@ -5012,7 +5014,7 @@ export const setNodeDataDumpExcluded = mutation({
     const ctx = withGuards(rawCtx, "workspace:setNodeDataDumpExcluded");
     await assertOwnerKeyGuarded(ctx.db, args.ownerKey);
     for (const nodeId of args.nodeIds) {
-      await assertNodeEditable(ctx, nodeId, "other");
+      await assertNodeEditable(ctx, nodeId, "dataDump");
     }
 
     const uniqueNodeIds = [
@@ -6839,10 +6841,14 @@ async function moveNodeTreeCore(
 
   await assertNodeEditable(ctx, node, "move");
   if (pageId !== node.pageId) {
-    const page = await assertPageWritable(ctx, pageId);
-    if (args.strict && (!page || page.archived)) {
-      throw new ConvexError("Choose an active page as the destination.");
+    // Strict callers get the destination message before the guard's generic one.
+    if (args.strict) {
+      const page = await ctx.db.get(pageId);
+      if (!page || page.archived) {
+        throw new ConvexError("Choose an active page as the destination.");
+      }
     }
+    await assertPageWritable(ctx, pageId);
   }
   const parentProblem = await assertValidParent(ctx, { nodeId: node._id, parentNodeId, pageId });
   if (args.strict && parentProblem) {

@@ -88,6 +88,7 @@ import {
   getNodeMeta,
   getPageMeta,
   isNodeLocked,
+  withoutLockedNodeIds,
   isPlannerLinkedTaskCopy,
   completionIntentFor,
   completionStateMatches,
@@ -174,6 +175,7 @@ import {
 } from "@/components/workspaceHistory";
 import { recoverFromConvexError, reloadNow } from "@/components/appUpdate";
 import { convexHealth, describeWriteError } from "@/lib/domain/convexHealth";
+import { guardRefusalOf } from "@/lib/domain/guardRefusal";
 import { isConvexServerError } from "@/lib/domain/appVersion";
 import { ArchiveSearchPanel } from "@/components/ArchiveSearchPanel";
 import { FindReplacePanel } from "@/components/FindReplacePanel";
@@ -4144,7 +4146,10 @@ function ConfiguredWorkspace({
       try {
         return await operation();
       } catch (error) {
-        setSyncErrorMessage(describeWriteError(error, fallbackMessage));
+        // A guard refusal already shows in the status banner.
+        if (!guardRefusalOf(error)) {
+          setSyncErrorMessage(describeWriteError(error, fallbackMessage));
+        }
         throw error;
       } finally {
         finishPendingSync(token);
@@ -6258,8 +6263,17 @@ function ConfiguredWorkspace({
       return;
     }
 
-    const { selectedRootNodeIds, selectedRoots } = getSelectedClipboardRoots();
+    const clipboardRoots = getSelectedClipboardRoots();
+    if (clipboardRoots.selectedRoots.length === 0 || clipboardRoots.selectedRootNodeIds.length === 0) {
+      return;
+    }
+    // Section headers and planner days can't be archived, so they aren't cut
+    // (the server refuses it); the rest of the selection is.
+    const selectedRoots = withoutLockedNodeIds(clipboardRoots.selectedRoots, (node) => node);
+    const selectedRootNodeIds = withoutLockedNodeIds(clipboardRoots.selectedRootNodeIds, (nodeId) => workspaceNodeMap.get(nodeId) ?? undefined);
     if (selectedRoots.length === 0 || selectedRootNodeIds.length === 0) {
+      event.preventDefault();
+      setCopySnackbarMessage("Section headers and planner days can't be cut");
       return;
     }
 
@@ -6305,6 +6319,7 @@ function ConfiguredWorkspace({
     getSelectedClipboardRoots,
     selectedNodeIds,
     setCopySnackbarMessage,
+    workspaceNodeMap,
   ]);
   const pasteCutNodesAfterSelection = useCallback(async (cutPayload: OutlineCutClipboardPayload) => {
     if (selectedNodeIds.size === 0) {
@@ -8428,7 +8443,8 @@ function ConfiguredWorkspace({
     const favoriteContextPage = favoriteTargetPage;
     const favoriteContextNode = favoriteTargetNode;
     const linkAutocompleteContextNode = favoriteTargetNode;
-    const moveTargetRootNodeIds = getActionContextRootNodeIds();
+    // Section headers and planner days stay put (the server refuses moving them).
+    const moveTargetRootNodeIds = withoutLockedNodeIds(getActionContextRootNodeIds(), (nodeId) => workspaceNodeMap.get(nodeId) ?? undefined);
     const dataDumpTargetRootNodeIds = getActionContextRootNodeIds();
     const dataDumpTargetNodes = dataDumpTargetRootNodeIds
       .map((nodeId) => workspaceNodeMap.get(nodeId) ?? null)

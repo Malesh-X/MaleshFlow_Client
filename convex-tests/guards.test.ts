@@ -2,18 +2,25 @@
 // Mutation tests for the Phase 2 write guards (convex/lib/guards.ts).
 import { convexTest } from "convex-test";
 import { ConvexError } from "convex/values";
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterAll, beforeEach, describe, expect, test } from "vitest";
 import { api } from "../convex/_generated/api";
 import type { Doc, Id } from "../convex/_generated/dataModel";
 import { appendPlannerDayCore } from "../convex/lib/planner";
 import { assertNodeEditable, assertValidParent, normalizeSchedule, withGuards } from "../convex/lib/guards";
 import schema from "../convex/schema";
+import { guardRefusalOf } from "../lib/domain/guardRefusal";
 
 const modules = import.meta.glob(["../convex/**/*.ts", "!../convex/**/*.d.ts", "../convex/_generated/*.js"]);
 const ownerKey = "test-owner-key";
 
 beforeEach(() => {
   process.env.OWNER_ACCESS_TOKEN = ownerKey;
+  // Most tests check record mode; enforce tests set this themselves.
+  process.env.GUARD_MODE_OVERRIDE = "record";
+});
+
+afterAll(() => {
+  delete process.env.GUARD_MODE_OVERRIDE;
 });
 
 function setup() {
@@ -34,7 +41,8 @@ function setup() {
 }
 
 describe("normal app flows", () => {
-  test("record no violations", async () => {
+  test.each(["record", "enforce"] as const)("%s mode: no violations, nothing refused", async (mode) => {
+    process.env.GUARD_MODE_OVERRIDE = mode;
     const { t, violations, notePage, add, node } = setup();
     const { pageId, main } = await notePage();
     const other = await notePage("Other");
@@ -66,7 +74,8 @@ describe("normal app flows", () => {
 });
 
 describe("planner, task page and page-type flows", () => {
-  test("record no violations", async () => {
+  test.each(["record", "enforce"] as const)("%s mode: no violations, nothing refused", async (mode) => {
+    process.env.GUARD_MODE_OVERRIDE = mode;
     const { t, violations, nodesOf, section, add, node } = setup();
     for (const [sidebarSection, pageType] of [
       ["Models", "model"], ["Journal", "journal"], ["Views", "multiPage"], ["Scratchpads", "scratchpad"], ["Templates", "default"], ["Notes", "note"],
@@ -286,4 +295,119 @@ test("guardViolations:list returns rows to the owner only", async () => {
   const result = await t.query(api.guardViolations.list, { ownerKey });
   expect(result).toMatchObject({ mode: "record", total: 1, counts: { "workspace:deleteNode / assertNodeEditable": 1 } });
   await expect(t.query(api.guardViolations.list, { ownerKey: "wrong" })).rejects.toThrow();
+});
+
+describe("enforce mode through public mutations", () => {
+  beforeEach(() => {
+    process.env.GUARD_MODE_OVERRIDE = "enforce";
+  });
+
+  const refusalOf = async (promise: Promise<unknown>) => {
+    const error = await promise.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ConvexError);
+    return guardRefusalOf(error);
+  };
+
+  test("a refused write throws a guardRefused error, changes nothing and logs nothing", async () => {
+    const { t, violations, notePage, add, node } = setup();
+    const { pageId, main } = await notePage();
+    const a = await add(pageId, "A", main);
+    const b = await add(pageId, "B", a);
+
+    const archived = await refusalOf(t.mutation(api.workspace.setNodeTreeArchived, { ownerKey, nodeId: main, archived: true }));
+    expect(archived).toMatchObject({
+      code: "guardRefused",
+      mutation: "workspace:setNodeTreeArchived",
+      guard: "assertNodeEditable",
+      nodeId: main,
+      pageId,
+    });
+    expect(archived?.message).toMatch(/Section headers/);
+    expect((await node(main))?.archived).toBe(false);
+
+    const loop = await refusalOf(t.mutation(api.workspace.moveNode, { ownerKey, nodeId: a, parentNodeId: b }));
+    expect(loop).toMatchObject({ mutation: "workspace:moveNode", guard: "assertValidParent" });
+    expect((await node(a))?.parentNodeId).toBe(main);
+
+    const recurring = await refusalOf(t.mutation(api.workspace.updateNode, { ownerKey, nodeId: b, kind: "task", taskStatus: "todo", recurrenceFrequency: "daily" }));
+    expect(recurring).toMatchObject({ guard: "normalizeSchedule", message: "A recurring item needs a due date." });
+    expect((await node(b))?.kind).toBe("note");
+
+    expect(await violations()).toEqual([]);
+  });
+
+  test("schedules are normalized instead of refused", async () => {
+    const { t, violations, notePage, add, node } = setup();
+    const { pageId, main } = await notePage();
+    const task = await add(pageId, "T", main, { kind: "task", taskStatus: "todo", dueAt: 1000, dueEndAt: 3000, recurrenceFrequency: "weekly" });
+    await t.mutation(api.workspace.updateNode, { ownerKey, nodeId: task, dueAt: null });
+    expect(await node(task)).toMatchObject({ dueAt: null, dueEndAt: null });
+    expect(((await node(task))?.sourceMeta as Record<string, unknown>)?.recurrenceFrequency ?? null).toBeNull();
+    expect(await violations()).toEqual([]);
+  });
+
+  test("legacy adapters only old tabs call keep logging instead of refusing", async () => {
+    const { t, violations, notePage } = setup();
+    const { main } = await notePage();
+    await t.mutation(api.workspace.deleteNode, { ownerKey, nodeId: main });
+    expect((await violations()).map((row) => [row.mutation, row.mode])).toEqual([["workspace:deleteNode", "record"]]);
+  });
+
+  test("data dump exclusion still works on archived pages and their items", async () => {
+    const { t, notePage, add, node } = setup();
+    const { pageId, main } = await notePage();
+    const a = await add(pageId, "A", main);
+    await t.mutation(api.workspace.archivePage, { ownerKey, pageId, archived: true });
+    await t.mutation(api.workspace.setPageDataDumpExcluded, { ownerKey, pageId, excluded: true });
+    await t.mutation(api.workspace.setNodeDataDumpExcluded, { ownerKey, nodeIds: [a], excluded: true });
+    expect(((await node(a))?.sourceMeta as Record<string, unknown>)?.excludeFromDataDump).toBe(true);
+    // Other edits on the archived page are still refused.
+    expect(await refusalOf(t.mutation(api.workspace.updateNode, { ownerKey, nodeId: a, text: "edit" }))).toMatchObject({ guard: "assertNodeEditable" });
+  });
+
+  test("find and replace scoped to an archived page changes nothing instead of failing", async () => {
+    const { t, notePage, add, node } = setup();
+    const { pageId, main } = await notePage();
+    const a = await add(pageId, "old text", main);
+    await t.mutation(api.workspace.archivePage, { ownerKey, pageId, archived: true });
+    await t.mutation(api.workspace.applyFindAndReplaceBatch, { ownerKey, find: "old", replace: "new", pageId });
+    await t.mutation(api.workspace.applyFindAndReplaceBatch, { ownerKey, find: "old", replace: "new" });
+    expect((await node(a))?.text).toBe("old text");
+  });
+
+  test("guardViolations:list reports enforce mode", async () => {
+    const { t } = setup();
+    expect(await t.query(api.guardViolations.list, { ownerKey })).toMatchObject({ mode: "enforce", total: 0 });
+  });
+});
+
+describe("guardViolations:reportRefusal", () => {
+  const report = { caller: "app" as const, mutation: "workspace:moveNode", guard: "assertValidParent", detail: "parent x: loop" };
+
+  test("logs a refusal with its caller, grouped by caller in list", async () => {
+    const { t, violations } = setup();
+    await t.mutation(api.guardViolations.reportRefusal, { ownerKey, ...report, nodeId: "n1", pageId: "p1" });
+    await t.mutation(api.guardViolations.reportRefusal, { ownerKey, ...report, caller: "cli" });
+    const rows = await violations();
+    expect(rows.map((row) => [row.mode, row.caller, row.nodeId ?? null])).toEqual([
+      ["enforce", "app", "n1"],
+      ["enforce", "cli", null],
+    ]);
+    const listed = await t.query(api.guardViolations.list, { ownerKey });
+    expect(listed.counts).toEqual({ "workspace:moveNode / assertValidParent / app": 1, "workspace:moveNode / assertValidParent / cli": 1 });
+    expect(listed.groups.map((group) => group.count)).toEqual([1, 1]);
+    expect(listed.recent[0]).toMatchObject({ caller: "cli", mode: "enforce" });
+  });
+
+  test("refuses a wrong key, ignores unknown guards and caps reports per minute", async () => {
+    const { t, violations } = setup();
+    await expect(t.mutation(api.guardViolations.reportRefusal, { ownerKey: "wrong", ...report })).rejects.toThrow();
+    await t.mutation(api.guardViolations.reportRefusal, { ownerKey, ...report, guard: "madeUp" });
+    expect(await violations()).toEqual([]);
+    for (let index = 0; index < 35; index += 1) await t.mutation(api.guardViolations.reportRefusal, { ownerKey, ...report });
+    expect(await violations()).toHaveLength(30);
+  });
 });

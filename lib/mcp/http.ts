@@ -6,6 +6,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import { ConvexError } from "convex/values";
+import { reportGuardRefusal } from "../domain/guardRefusal";
 import { ToolError, registerFlowTools, type FlowCalls } from "./tools";
 
 export const MCP_PATH = "/api/mcp";
@@ -74,7 +75,15 @@ const fn = (path: string) => {
 export function agentCalls(client: ConvexHttpClient, token: string): FlowCalls {
   return {
     query: (path, args = {}) => client.query(fn(path), { ...args, ownerKey: token }),
-    mutation: (path, args = {}) => client.mutation(fn(path), { ...args, ownerKey: token }),
+    mutation: async (path, args = {}) => {
+      try {
+        return await client.mutation(fn(path), { ...args, ownerKey: token });
+      } catch (error) {
+        // The refused mutation rolled back its own log row (lib/domain/guardRefusal.ts).
+        await reportGuardRefusal(error, "mcp", (report) => client.mutation(fn("guardViolations:reportRefusal"), { ...report, ownerKey: token }));
+        throw error;
+      }
+    },
   };
 }
 

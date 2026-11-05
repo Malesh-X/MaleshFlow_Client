@@ -5,6 +5,10 @@
 // Mutations and actions that fail because the backend no longer matches this
 // bundle report here too. The app shows a small banner from this state and
 // the stale-tab watcher reloads at a safe moment (components/appUpdate.tsx).
+// A write the server guards refused is not an outdated bundle: it shows a short
+// "Not saved" notice in the same banner and needs no reload.
+
+import { guardRefusalMessage, guardRefusalOf } from "./guardRefusal";
 
 export type ConvexProblemKind =
   // The backend no longer has (or no longer accepts) what this bundle calls:
@@ -24,6 +28,8 @@ export type ConvexHealthSnapshot = {
   problem: ConvexProblem | null;
   // When a write last failed because this bundle is out of date.
   lastFailedWriteAt: number | null;
+  // The last write the server guards refused, until it is dismissed.
+  refusal: { message: string; at: number } | null;
 };
 
 function errorMessage(error: unknown) {
@@ -53,7 +59,8 @@ export function createConvexHealthStore() {
   const queryProblems = new Map<string, ConvexProblem>();
   const listeners = new Set<() => void>();
   let lastFailedWriteAt: number | null = null;
-  let snapshot: ConvexHealthSnapshot = { problem: null, lastFailedWriteAt: null };
+  let refusal: ConvexHealthSnapshot["refusal"] = null;
+  let snapshot: ConvexHealthSnapshot = { problem: null, lastFailedWriteAt: null, refusal: null };
 
   const recompute = () => {
     let problem: ConvexProblem | null = null;
@@ -65,8 +72,8 @@ export function createConvexHealthStore() {
     if (!problem && lastFailedWriteAt !== null) {
       problem = { kind: "outdated", source: "write", message: "" };
     }
-    if (problem !== snapshot.problem || lastFailedWriteAt !== snapshot.lastFailedWriteAt) {
-      snapshot = { problem, lastFailedWriteAt };
+    if (problem !== snapshot.problem || lastFailedWriteAt !== snapshot.lastFailedWriteAt || refusal !== snapshot.refusal) {
+      snapshot = { problem, lastFailedWriteAt, refusal };
       for (const listener of listeners) {
         listener();
       }
@@ -107,9 +114,28 @@ export function createConvexHealthStore() {
       recompute();
       return true;
     },
+    // A write the server guards refused. Returns true when the error was one.
+    reportGuardRefusal(error: unknown, now = Date.now()) {
+      const found = guardRefusalOf(error);
+      if (!found) {
+        return false;
+      }
+      refusal = { message: guardRefusalMessage(found), at: now };
+      recompute();
+      return true;
+    },
+    // Hides the refusal notice (only the one shown at `at`, when given).
+    clearRefusal(at?: number) {
+      if (!refusal || (at !== undefined && refusal.at !== at)) {
+        return;
+      }
+      refusal = null;
+      recompute();
+    },
     reset() {
       queryProblems.clear();
       lastFailedWriteAt = null;
+      refusal = null;
       recompute();
     },
   };
@@ -126,6 +152,10 @@ export const OUTDATED_WRITE_MESSAGE =
 export function describeWriteError(error: unknown, fallbackMessage: string) {
   if (isOutdatedClientError(error)) {
     return OUTDATED_WRITE_MESSAGE;
+  }
+  const refusal = guardRefusalOf(error);
+  if (refusal) {
+    return guardRefusalMessage(refusal);
   }
   const message = errorMessage(error).trim();
   return message.length > 0 ? message : fallbackMessage;
